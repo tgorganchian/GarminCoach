@@ -1,0 +1,23 @@
+# Config y secretos reales — nunca se suben. Ver los *.example / *.template para el formato.
+.env
+.env.bak
+athlete_config.py
+workout_plan.py
+
+# Datos generados en cada sync — son tuyos, no del repo.
+*.csv
+feedback/
+garmin_tokens/
+credentials.json
+token.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv-whisper/
+
+# Copias de trabajo de los templates de la skill (si probás la skill acá mismo).
+skill/references/*.md
+!skill/references/*.template.md
+!skill/references/example/
