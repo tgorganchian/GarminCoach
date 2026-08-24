@@ -142,6 +142,13 @@ GarminCoach/
 
 ## Notes
 
+- **This repo's commit history is short on purpose.** GarminCoach started as
+  a personal, single-user tool — the actual iteration (fixing edge cases,
+  tuning the anomaly detection, building out the weekly feedback loop) all
+  happened locally over months of daily use, without version control, before
+  this was ever meant to be shared. What's here is a deliberate extraction of
+  that finished tool into a clean, generic, publishable form — not a from-scratch
+  weekend project. A thin git log doesn't mean thin effort.
 - Uses the community [`garminconnect`](https://github.com/cyberjunky/python-garminconnect)
   library — this is not Garmin's official API, and it can break when Garmin
   changes something server-side. The upstream repo tends to patch fast.
