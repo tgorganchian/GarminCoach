@@ -1,10 +1,10 @@
-# Config y secretos reales — nunca se suben. Ver los *.example / *.template para el formato.
+# Real config and secrets — never committed. See the *.example / *.template files for the format.
 .env
 .env.bak
 athlete_config.py
 workout_plan.py
 
-# Datos generados en cada sync — son tuyos, no del repo.
+# Data generated on each sync — yours, not the repo's.
 *.csv
 feedback/
 garmin_tokens/
@@ -17,7 +17,7 @@ __pycache__/
 .venv/
 .venv-whisper/
 
-# Copias de trabajo de los templates de la skill (si probás la skill acá mismo).
+# Working copies of the skill templates (if you try the skill out right here).
 skill/references/*.md
 !skill/references/*.template.md
 !skill/references/example/

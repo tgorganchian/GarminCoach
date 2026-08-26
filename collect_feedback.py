@@ -1,17 +1,17 @@
 """
-Recolecta las notas de voz de Mensajes Guardados de Telegram, las transcribe
-con faster-whisper y las deja en feedback/pending.jsonl para que la skill
-running-coach las vuelque a la bitacora semanal de Obsidian.
+Collects voice notes from Telegram Saved Messages, transcribes them with
+faster-whisper, and drops them in feedback/pending.jsonl so the
+running-coach skill can fold them into the weekly Obsidian log.
 
-Uso:
-    python collect_feedback.py --login    -> autenticacion inicial (una sola vez, interactivo)
-    python collect_feedback.py            -> baja lo nuevo y transcribe
-    python collect_feedback.py --dry-run  -> muestra que bajaria, sin transcribir ni escribir
+Usage:
+    python collect_feedback.py --login    -> initial authentication (one-time, interactive)
+    python collect_feedback.py            -> fetches what's new and transcribes it
+    python collect_feedback.py --dry-run  -> shows what would be fetched, without transcribing or writing
 
-Estado:
-    feedback/state.json      ultimo message_id procesado (para no repetir)
-    feedback/audios/*.ogg    audios originales, se conservan siempre
-    feedback/pending.jsonl   cola append-only que consume la skill
+State:
+    feedback/state.json      last processed message_id (to avoid repeats)
+    feedback/audios/*.ogg    original audio files, always kept
+    feedback/pending.jsonl   append-only queue consumed by the skill
 """
 
 import json
@@ -21,9 +21,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ctranslate2 en Windows necesita cuBLAS/cuDNN de CUDA 12. Los wheels nvidia-*-cu12
-# las traen, pero ctranslate2 resuelve la DLL por su cuenta y os.add_dll_directory()
-# no le alcanza: hay que meterlas en el PATH del proceso ANTES de importar el modulo.
+# ctranslate2 on Windows needs CUDA 12's cuBLAS/cuDNN. The nvidia-*-cu12
+# wheels bundle them, but ctranslate2 resolves the DLL on its own and
+# os.add_dll_directory() isn't enough: they need to be on the process PATH
+# BEFORE the module is imported.
 if sys.platform == "win32":
     _dirs = [
         str(Path(sys.prefix) / "Lib" / "site-packages" / "nvidia" / sub / "bin")
@@ -41,69 +42,73 @@ FEEDBACK = BASE / "feedback"
 AUDIOS = FEEDBACK / "audios"
 PENDING = FEEDBACK / "pending.jsonl"
 STATE = FEEDBACK / "state.json"
-SESSION = FEEDBACK / "telegram"          # Telethon le agrega .session
+SESSION = FEEDBACK / "telegram"          # Telethon appends .session
 
-MODELO = os.environ.get("WHISPER_MODEL", "medium")
+MODEL = os.environ.get("WHISPER_MODEL", "medium")
 COMPUTE = "int8_float16"
 DEVICE = "cuda"
 
-PROMPT = (
-    "Entrenamiento de running. Ritmo, pace, kilometros, series, tempo, fondo, "
-    "trote regenerativo, umbral, pulsaciones, rodilla, gemelos, isquiotibiales, "
-    "cintilla iliotibial, zancada, cadencia."
+# Vocabulary passed to Whisper as a context hint (improves transcription of
+# running jargon and injury/muscle names). Written in Spanish because it's
+# tuned for Spanish-language voice notes — override with WHISPER_PROMPT in
+# .env to match your own language and vocabulary (injuries you're carrying,
+# session names you use, etc.), entirely up to you.
+PROMPT = os.environ.get("WHISPER_PROMPT") or (
+    "Entrenamiento de running. Ritmo, pace, kilometros, series, intervalos, "
+    "tempo, fondo, trote regenerativo, umbral, pulsaciones, zancada, cadencia."
 )
 
-# Tope de seguridad: si nunca se corrio, no bajar todo el historial de Mensajes
-# Guardados de golpe. La primera corrida mira solo los ultimos N mensajes.
-PRIMERA_CORRIDA_LIMITE = 20
+# Safety cap: if it's never been run before, don't pull the entire Saved
+# Messages history at once. The first run only looks at the last N messages.
+FIRST_RUN_LIMIT = 20
 
 
-def cargar_estado() -> dict:
+def load_state() -> dict:
     if STATE.exists():
-        return json.loads(STATE.read_text(encoding="utf-8"))
-    return {"ultimo_id": 0}
+        return json.loads(STATE.read_text(encoding="utf-8-sig"))
+    return {"last_id": 0}
 
 
-def guardar_estado(estado: dict) -> None:
-    STATE.write_text(json.dumps(estado, indent=2), encoding="utf-8")
+def save_state(state: dict) -> None:
+    STATE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
-def cliente() -> TelegramClient:
+def client_() -> TelegramClient:
     load_dotenv(BASE / ".env")
     api_id = os.environ.get("TELEGRAM_API_ID")
     api_hash = os.environ.get("TELEGRAM_API_HASH")
     if not api_id or not api_hash:
-        print("Faltan TELEGRAM_API_ID / TELEGRAM_API_HASH en .env")
+        print("Missing TELEGRAM_API_ID / TELEGRAM_API_HASH in .env")
         raise SystemExit(1)
     FEEDBACK.mkdir(parents=True, exist_ok=True)
     return TelegramClient(str(SESSION), int(api_id), api_hash)
 
 
 def login() -> int:
-    """Autenticacion inicial. Pide telefono y codigo por consola."""
-    print("Autenticacion de Telegram (solo la primera vez).")
-    print("El codigo llega DENTRO de Telegram, no por SMS.\n")
-    with cliente() as cli:
-        yo = cli.get_me()
-        print(f"\nListo. Sesion iniciada como: {yo.first_name} (@{yo.username or 'sin usuario'})")
-        print(f"Sesion guardada en: {SESSION}.session")
-        print("Ese archivo es una credencial de tu cuenta: no lo compartas ni lo subas a la Vault.")
+    """Initial authentication. Prompts for phone number and code on the console."""
+    print("Telegram authentication (one-time only).")
+    print("The code arrives INSIDE Telegram, not via SMS.\n")
+    with client_() as cli:
+        me = cli.get_me()
+        print(f"\nDone. Logged in as: {me.first_name} (@{me.username or 'no username'})")
+        print(f"Session saved to: {SESSION}.session")
+        print("That file is a credential for your account: don't share it or commit it.")
     return 0
 
 
-def cargar_modelo():
+def load_model():
     from faster_whisper import WhisperModel
 
-    print(f"Cargando {MODELO} en {DEVICE} ({COMPUTE})...")
+    print(f"Loading {MODEL} on {DEVICE} ({COMPUTE})...")
     t0 = time.perf_counter()
-    m = WhisperModel(MODELO, device=DEVICE, compute_type=COMPUTE)
-    print(f"Modelo cargado en {time.perf_counter() - t0:.1f}s")
+    m = WhisperModel(MODEL, device=DEVICE, compute_type=COMPUTE)
+    print(f"Model loaded in {time.perf_counter() - t0:.1f}s")
     return m
 
 
-def transcribir(modelo, ruta: Path) -> str:
-    segmentos, _ = modelo.transcribe(
-        str(ruta),
+def transcribe(model, path: Path) -> str:
+    segments, _ = model.transcribe(
+        str(path),
         language="es",
         beam_size=5,
         vad_filter=True,
@@ -111,77 +116,77 @@ def transcribir(modelo, ruta: Path) -> str:
         condition_on_previous_text=False,
         initial_prompt=PROMPT,
     )
-    return " ".join(s.text.strip() for s in segmentos).strip()
+    return " ".join(s.text.strip() for s in segments).strip()
 
 
-def recolectar(dry_run: bool = False) -> int:
+def collect(dry_run: bool = False) -> int:
     AUDIOS.mkdir(parents=True, exist_ok=True)
-    estado = cargar_estado()
-    ultimo_id = estado.get("ultimo_id", 0)
+    state = load_state()
+    last_id = state.get("last_id", 0)
 
-    with cliente() as cli:
+    with client_() as cli:
         if not cli.is_user_authorized():
-            print("No hay sesion valida. Corré primero:")
+            print("No valid session. Run this first:")
             print("    python collect_feedback.py --login")
             return 1
 
-        kwargs = {"min_id": ultimo_id} if ultimo_id else {"limit": PRIMERA_CORRIDA_LIMITE}
-        if not ultimo_id:
-            print(f"Primera corrida: reviso los ultimos {PRIMERA_CORRIDA_LIMITE} mensajes.")
+        kwargs = {"min_id": last_id} if last_id else {"limit": FIRST_RUN_LIMIT}
+        if not last_id:
+            print(f"First run: checking the last {FIRST_RUN_LIMIT} messages.")
 
-        # 'me' es Mensajes Guardados. Nunca se leen otros chats.
-        mensajes = [m for m in cli.iter_messages("me", **kwargs) if m.voice or m.audio]
-        mensajes.reverse()  # cronologico
+        # 'me' is Saved Messages. No other chats are ever read.
+        messages = [m for m in cli.iter_messages("me", **kwargs) if m.voice or m.audio]
+        messages.reverse()  # chronological order
 
-        if not mensajes:
-            print("No hay notas de voz nuevas.")
+        if not messages:
+            print("No new voice notes.")
             return 0
 
-        print(f"Notas de voz nuevas: {len(mensajes)}")
+        print(f"New voice notes: {len(messages)}")
         if dry_run:
-            for m in mensajes:
+            for m in messages:
                 dur = getattr(m.voice or m.audio, "duration", "?") if (m.voice or m.audio) else "?"
                 print(f"  id={m.id}  {m.date.astimezone():%Y-%m-%d %H:%M}  {dur}s")
             return 0
 
-        modelo = cargar_modelo()
-        nuevo_ultimo = ultimo_id
+        model = load_model()
+        new_last_id = last_id
 
-        with PENDING.open("a", encoding="utf-8") as cola:
-            for m in mensajes:
+        with PENDING.open("a", encoding="utf-8") as queue:
+            for m in messages:
                 ts_local = m.date.astimezone()
-                nombre = f"{ts_local:%Y%m%dT%H%M%S}_{m.id}.ogg"
-                destino = AUDIOS / nombre
+                name = f"{ts_local:%Y%m%dT%H%M%S}_{m.id}.ogg"
+                dest = AUDIOS / name
 
-                if not destino.exists():
-                    cli.download_media(m, file=str(destino))
+                if not dest.exists():
+                    cli.download_media(m, file=str(dest))
 
-                print(f"\n[{m.id}] {ts_local:%Y-%m-%d %H:%M}  -> {nombre}")
+                print(f"\n[{m.id}] {ts_local:%Y-%m-%d %H:%M}  -> {name}")
                 try:
-                    texto = transcribir(modelo, destino)
-                    print(f"  {texto}")
-                except Exception as exc:  # el audio ya esta a salvo en disco
-                    texto = None
-                    print(f"  ERROR al transcribir: {exc}")
+                    text = transcribe(model, dest)
+                    print(f"  {text}")
+                except Exception as exc:  # the audio is already safe on disk
+                    text = None
+                    print(f"  ERROR transcribing: {exc}")
 
-                cola.write(json.dumps({
+                queue.write(json.dumps({
                     "ts": ts_local.isoformat(),
                     "message_id": m.id,
-                    "audio": str(destino.relative_to(BASE)).replace("\\", "/"),
-                    "text": texto,
+                    "audio": str(dest.relative_to(BASE)).replace("\\", "/"),
+                    "text": text,
                     "activity_id": None,
                     "consumed": False,
-                    "rechazado": False,
+                    "rejected": False,
                 }, ensure_ascii=False) + "\n")
-                cola.flush()
+                queue.flush()
 
-                # Guardar estado por mensaje: si se corta a mitad de lote, el
-                # proximo run no re-procesa (y duplica en pending.jsonl) lo ya escrito.
-                nuevo_ultimo = max(nuevo_ultimo, m.id)
-                estado["ultimo_id"] = nuevo_ultimo
-                estado["ultima_corrida"] = datetime.now(timezone.utc).isoformat()
-                guardar_estado(estado)
-        print(f"\nListo. {len(mensajes)} entradas agregadas a {PENDING.name}")
+                # Save state after every message: if it's interrupted mid-batch,
+                # the next run won't re-process (and duplicate) what's already written.
+                new_last_id = max(new_last_id, m.id)
+                state["last_id"] = new_last_id
+                state["last_run"] = datetime.now(timezone.utc).isoformat()
+                save_state(state)
+        print(f"\nDone. {len(messages)} entries added to {PENDING.name}")
 
     return 0
 
@@ -189,7 +194,7 @@ def recolectar(dry_run: bool = False) -> int:
 def main() -> int:
     if "--login" in sys.argv:
         return login()
-    return recolectar(dry_run="--dry-run" in sys.argv)
+    return collect(dry_run="--dry-run" in sys.argv)
 
 
 if __name__ == "__main__":

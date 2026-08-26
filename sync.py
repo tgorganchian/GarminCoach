@@ -15,36 +15,36 @@ import requests
 from dotenv import load_dotenv
 from garminconnect import Garmin
 
-# Carga variables desde .env en la carpeta del script (si existe)
+# Load variables from .env in the script's folder (if it exists)
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 try:
     import athlete_config as cfg
 except ModuleNotFoundError:
     raise SystemExit(
-        "Falta athlete_config.py al lado de este script.\n"
-        "Copia athlete_config.example.py -> athlete_config.py y completa tus datos "
-        "(nunca se sube a git, ya esta en .gitignore)."
+        "Missing athlete_config.py next to this script.\n"
+        "Copy athlete_config.example.py -> athlete_config.py and fill in your data "
+        "(never committed, already in .gitignore)."
     )
 
 # ─── CONFIG ───────────────────────────────────────────────
 GARMIN_EMAIL = os.getenv("GARMIN_EMAIL")
 GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD")
 
-# Desde qué fecha pedir historial a Garmin
+# Start date for requesting history from Garmin
 HISTORY_START_DATE = "2024-01-01"
-# Días de solapamiento al buscar "solo lo nuevo" (zonas horarias / sync tardío)
+# Days of overlap when fetching "only what's new" (time zones / late sync)
 INCREMENTAL_OVERLAP_DAYS = 3
-# Poné True UNA vez si el CSV tenía solo un tramo corto y querés traer TODO el historial
-# (tarda más; al terminar volvé a False)
+# Set True ONCE if the CSV only had a short stretch and you want to pull the FULL history
+# (takes longer; set back to False when done)
 FULL_BACKFILL = False
 # Set False to skip lap fetching (e.g. if hitting Garmin rate limits)
 FETCH_LAPS = True
-# Poné True UNA vez para traer laps de TODAS las actividades históricas; luego volvé a False
+# Set True ONCE to fetch laps for ALL historical activities; then set back to False
 BACKFILL_LAPS = False
 # Set False to skip downloading FIT files for self-evaluation + training metrics
 FETCH_SELF_EVAL = True
-# Poné True UNA vez para traer self-eval de TODAS las actividades históricas; luego volvé a False
+# Set True ONCE to fetch self-eval for ALL historical activities; then set back to False
 BACKFILL_SELF_EVAL = False
 
 CSV_PATH = os.getenv("CSV_PATH")
@@ -53,15 +53,7 @@ TRAINING_HISTORY_PATH = os.getenv("TRAINING_HISTORY_PATH")
 # Derived automatically — same folder as activities.csv
 LAPS_CSV_PATH = str(Path(CSV_PATH).parent / "activity_laps.csv") if CSV_PATH else None
 
-# Palabras clave en el título que identifican sesiones de calidad — generico,
-# ajustalo si tus títulos de actividad usan otro vocabulario.
-QUALITY_KEYWORDS = [
-    "interval", "tempo", "fartlek", "repetici", "series", "800m", "1000m",
-    "400m", "umbral", "threshold", "race", "carrera", "5k", "10k", "competencia",
-    "stairway", "pyramid", "piramide", "rolling", "cruise","200m", "300m","600m"
-]
-
-# ─── Config del atleta (athlete_config.py, local, gitignored) ──────────────
+# ─── Athlete config (athlete_config.py, local, gitignored) ──────────────
 GEAR_CHANGES_SECTION = cfg.GEAR_CHANGES_SECTION
 HR_ZONES = cfg.HR_ZONES
 GEAR_CHANGE_DATE = cfg.GEAR_CHANGE_DATE
@@ -69,6 +61,7 @@ RACE_CALENDAR = cfg.RACE_CALENDAR
 LONG_RUN_KM = cfg.LONG_RUN_KM
 QUALITY_LAP_PACE_THRESHOLD = cfg.QUALITY_LAP_PACE_THRESHOLD
 MIN_QUALITY_LAP_KM = cfg.MIN_QUALITY_LAP_KM
+QUALITY_KEYWORDS = cfg.QUALITY_KEYWORDS
 PERSONAL_RECORDS = cfg.PERSONAL_RECORDS
 TRAINING_PLAN = cfg.TRAINING_PLAN
 WEATHER_LAT = cfg.WEATHER_LAT
@@ -86,7 +79,7 @@ def _float_or_none(v, ndigits=1):
 
 
 def _parse_activities(rows):
-    """Convierte las filas del CSV a dicts con tipos correctos."""
+    """Converts CSV rows into dicts with correct types."""
     result = []
     for row in rows:
         try:
@@ -116,7 +109,7 @@ def _parse_activities(rows):
 
 
 def _week_start(dt):
-    """Lunes de la semana de dt."""
+    """Monday of dt's week."""
     return dt - timedelta(days=dt.weekday())
 
 
@@ -446,9 +439,14 @@ def compute_vdot_section(personal_records):
 
 # ─── PLAN COMPLIANCE ─────────────────────────────────────────
 
+_PLAN_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
 def _parse_week_from_title(title):
-    """Extract week number and day from Runna title format 'W2 Mon Tempo...'"""
-    m = re.search(r"W(\d+)\s+(Mon|Wed|Fri|Sun)", title)
+    """Extract week number and day from a plan title like 'W2 Mon Tempo...'.
+    Matches whichever of the 7 weekdays the athlete actually trains on — see
+    TRAINING_PLAN in athlete_config.py."""
+    m = re.search(r"W(\d+)\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)", title)
     if not m:
         return None, None
     return int(m.group(1)), m.group(2).lower()
@@ -481,7 +479,7 @@ def compute_plan_compliance(acts, plan):
         planned_sessions = 0
         completed_sessions = 0
         details = []
-        for day in ["mon", "wed", "fri", "sun"]:
+        for day in _PLAN_DAYS:
             planned = wk.get(day)
             if planned is None:
                 continue
@@ -779,10 +777,10 @@ def fetch_garmin_race_predictions(client):
 
 
 def generate_training_history(rows, laps_rows=None, race_predictions=None):
-    """Regenera training-history.md con datos frescos del CSV."""
+    """Regenerates training-history.md with fresh data from the CSV."""
     acts = _parse_activities(rows)
     if not acts:
-        print("Sin actividades para generar training-history.md", flush=True)
+        print("No activities to generate training-history.md", flush=True)
         return
 
     total_runs = len(acts)
@@ -896,7 +894,7 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
         if pred_rows:
             race_pred_md = (
                 "\n### Garmin Race Predictions\n\n"
-                "> ⚠️ Las predicciones de Garmin tienden a ser optimistas — tomalas como techo, no como objetivo.\n\n"
+                "> ⚠️ Garmin's predictions tend to be optimistic — treat them as a ceiling, not a target.\n\n"
                 "| Distance | Predicted time |\n"
                 "|----------|----------------|\n"
                 + "\n".join(pred_rows)
@@ -1047,12 +1045,12 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
             f"| Distance | Predicted time |\n"
             f"|----------|----------------|\n"
             f"{pred_rows}\n\n"
-            f"> Basadas en la fórmula de Jack Daniels. Más conservadoras y realistas que las predicciones de Garmin.\n\n"
+            f"> Based on Jack Daniels' formula. More conservative and realistic than Garmin's predictions.\n\n"
             f"### Training Paces (VDOT-derived)\n\n"
             f"| Zone | Pace |\n"
             f"|------|------|\n"
             f"{pace_rows}\n\n"
-            f"> Estos paces se derivan del VDOT actual. Compará con los paces reales del athlete-profile para detectar desajustes."
+            f"> These paces are derived from the current VDOT. Compare with the real paces in athlete-profile to spot mismatches."
         )
 
     # ── Plan Compliance ──────────────────────────────────
@@ -1094,7 +1092,7 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
                     )
 
         compliance_md = (
-            f"## Plan Compliance (Runna 15-week)\n\n"
+            f"## Plan Compliance ({len(TRAINING_PLAN)}-week plan)\n\n"
             f"### Weekly Summary\n\n"
             f"| Week | Sessions | Completion |\n"
             f"|------|----------|------------|\n"
@@ -1307,11 +1305,11 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
 
     with open(TRAINING_HISTORY_PATH, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"training-history.md actualizado ({total_runs} actividades, hasta {date_max.date()})", flush=True)
+    print(f"training-history.md updated ({total_runs} activities, through {date_max.date()})", flush=True)
 
 
 def main():
-    # Evita que no se vea nada en consola (p. ej. al abrir .py con asociación de Windows)
+    # Avoids a blank console (e.g. when opening the .py via Windows file association)
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
             sys.stdout.reconfigure(line_buffering=True)
@@ -1319,26 +1317,26 @@ def main():
         except Exception:
             pass
 
-    # Conectar a Garmin
-    print("Conectando a Garmin...", flush=True)
+    # Connect to Garmin
+    print("Connecting to Garmin...", flush=True)
 
     try:
-        # Intentar usar tokens guardados primero
+        # Try using saved tokens first
         client = Garmin()
         client.login(tokenstore=GARMIN_TOKEN_DIR)
-        print("Login con tokens guardados exitoso", flush=True)
+        print("Login with saved tokens succeeded", flush=True)
     except Exception as e:
-        # Antes el except vacío ocultaba 429 / tokens rotos; hay que ver el motivo
-        print(f"No se pudieron usar tokens guardados: {e}", flush=True)
-        print("Haciendo login con usuario y contraseña...", flush=True)
+        # An empty except used to hide 429s / broken tokens; the reason needs to be visible
+        print(f"Could not use saved tokens: {e}", flush=True)
+        print("Logging in with username and password...", flush=True)
         client = Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
         client.login()
-        # Guardar tokens para la próxima vez
+        # Save tokens for next time
         os.makedirs(GARMIN_TOKEN_DIR, exist_ok=True)
         client.client.dump(GARMIN_TOKEN_DIR)
-        print("Tokens guardados para próximas ejecuciones", flush=True)
+        print("Tokens saved for future runs", flush=True)
 
-    # Leer fechas ya existentes en el CSV para no duplicar
+    # Read dates already in the CSV to avoid duplicates
     # On FULL_BACKFILL we rebuild from scratch so all rows get the latest fields (e.g. activity_id)
     existing_dates = set()
     existing_rows = []
@@ -1347,22 +1345,22 @@ def main():
             reader = csv.DictReader(f)
             for row in reader:
                 existing_rows.append(row)
-                existing_dates.add(row["date"] + row["title"])  # date + titulo como clave unica
+                existing_dates.add(row["date"] + row["title"])  # date + title as unique key
 
-    # Rango de fechas: historial completo (CSV vacío o FULL_BACKFILL) o solo tramo nuevo
+    # Date range: full history (empty CSV or FULL_BACKFILL) or just the new stretch
     end_date = datetime.today()
     history_start = datetime.strptime(HISTORY_START_DATE, "%Y-%m-%d")
 
     if FULL_BACKFILL:
         start_date = history_start
         print(
-            f"Modo backfill completo: desde {start_date.date()} hasta {end_date.date()}...",
+            f"Full backfill mode: from {start_date.date()} to {end_date.date()}...",
             flush=True,
         )
     elif not existing_rows:
         start_date = history_start
         print(
-            f"CSV vacío: descargando historial completo desde {start_date.date()}...",
+            f"Empty CSV: downloading full history from {start_date.date()}...",
             flush=True,
         )
     else:
@@ -1374,8 +1372,8 @@ def main():
             max_d - timedelta(days=INCREMENTAL_OVERLAP_DAYS),
         )
         print(
-            f"Modo incremental: actividades desde {start_date.date()} "
-            f"(última en CSV: {max_d.date()})...",
+            f"Incremental mode: activities from {start_date.date()} "
+            f"(latest in CSV: {max_d.date()})...",
             flush=True,
         )
 
@@ -1385,7 +1383,7 @@ def main():
         "running",
     )
 
-    # Filtrar solo las nuevas
+    # Filter only the new ones
     new_rows = []
     for act in activities:
         date = act.get("startTimeLocal", "")[:10]
@@ -1423,11 +1421,11 @@ def main():
         })
 
     if not new_rows:
-        print("No hay actividades nuevas", flush=True)
+        print("No new activities", flush=True)
     else:
-        print(f"{len(new_rows)} actividades nuevas encontradas", flush=True)
+        print(f"{len(new_rows)} new activities found", flush=True)
 
-    # Combinar existentes + nuevas y ordenar por fecha
+    # Combine existing + new and sort by date
     all_rows = existing_rows + new_rows
     all_rows.sort(key=lambda x: x["date"])
 
@@ -1458,7 +1456,7 @@ def main():
                 row["weather_temp_c"] = weather_data[d].get("temp_c", "")
                 row["weather_humidity_pct"] = weather_data[d].get("humidity_pct", "")
 
-    # Reescribir CSV completo ordenado
+    # Rewrite the full sorted CSV
     fieldnames = [
         "activity_id", "date", "title",
         "distance_km", "duration_min", "avg_pace_min_km",
@@ -1474,15 +1472,15 @@ def main():
         writer.writerows(all_rows)
 
     print(
-        f"CSV actualizado en {CSV_PATH} ({len(all_rows)} actividades totales)",
+        f"CSV updated at {CSV_PATH} ({len(all_rows)} total activities)",
         flush=True,
     )
 
     filled = sum(1 for row in all_rows for f in fieldnames if row.get(f, "") not in ("", None))
     total_possible = len(all_rows) * len(fieldnames)
     print(
-        f"Datos: {filled:,} campos con datos de {total_possible:,} posibles "
-        f"({filled / total_possible * 100:.1f}% cobertura, {len(fieldnames)} campos x {len(all_rows)} actividades)",
+        f"Data: {filled:,} filled fields out of {total_possible:,} possible "
+        f"({filled / total_possible * 100:.1f}% coverage, {len(fieldnames)} fields x {len(all_rows)} activities)",
         flush=True,
     )
     n = len(all_rows)
@@ -1501,8 +1499,8 @@ def main():
         lap_ids_in_csv = set(r.get("activity_id", "") for r in laps_rows)
         acts_with_laps = sum(1 for r in all_rows if str(r.get("activity_id", "")) in lap_ids_in_csv)
         print(
-            f"Laps: {len(laps_rows):,} splits en {acts_with_laps}/{len(all_rows)} actividades "
-            f"({acts_with_laps/len(all_rows)*100:.1f}% cobertura)",
+            f"Laps: {len(laps_rows):,} splits across {acts_with_laps}/{len(all_rows)} activities "
+            f"({acts_with_laps/len(all_rows)*100:.1f}% coverage)",
             flush=True,
         )
 
@@ -1530,12 +1528,12 @@ def main():
                     writer = csv.DictWriter(f, fieldnames=lap_fieldnames, extrasaction="ignore")
                     writer.writeheader()
                     writer.writerows(laps_rows)
-                print(f"{len(new_lap_rows)} lap records guardados en {LAPS_CSV_PATH}", flush=True)
+                print(f"{len(new_lap_rows)} lap records saved to {LAPS_CSV_PATH}", flush=True)
 
     # ── Garmin race predictions ────────────────────────────
     race_predictions = fetch_garmin_race_predictions(client)
 
-    # Regenerar training-history.md con datos frescos
+    # Regenerate training-history.md with fresh data
     generate_training_history(all_rows, laps_rows, race_predictions)
 
     # ── Auto-update athlete-profile.md ────────────────────
@@ -1554,12 +1552,12 @@ def main():
     avg_4w_km = sum(weekly_km[w] for w in last_4_weeks) / len(last_4_weeks) if last_4_weeks else None
     auto_update_athlete_profile(profile_path, latest_vo2, avg_4w_km)
 
-    print("Listo!", flush=True)
+    print("Done!", flush=True)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nCancelado.", flush=True)
+        print("\nCancelled.", flush=True)
         raise SystemExit(130) from None

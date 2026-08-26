@@ -1,12 +1,12 @@
-"""Crea y agenda en Garmin Connect los workouts estructurados del plan adaptado.
+"""Creates and schedules the adapted plan's structured workouts in Garmin Connect.
 
-Uso:
-    python create_workouts.py            # crea los workouts que falten y los agenda
-    python create_workouts.py --delete   # borra los workouts "Coach ..." previamente creados
+Usage:
+    python create_workouts.py            # creates any missing workouts and schedules them
+    python create_workouts.py --delete   # deletes previously created "Coach ..." workouts
 
-Login: mismos tokens guardados que sync.py (GARMIN_TOKEN_DIR en .env).
-Los workouts se nombran con prefijo "Coach" para distinguirlos de los de Runna.
-Si un workout con el mismo nombre ya existe, se saltea (idempotente).
+Login: same saved tokens as sync.py (GARMIN_TOKEN_DIR in .env).
+Workouts are named with a "Coach" prefix to tell them apart from Runna's.
+If a workout with the same name already exists, it's skipped (idempotent).
 """
 
 import importlib.util
@@ -23,7 +23,7 @@ GARMIN_TOKEN_DIR = os.getenv("GARMIN_TOKEN_DIR")
 
 WORKOUT_PREFIX = "Coach"
 
-# ─── Helpers para armar el JSON de workout-service ───────────────────────────
+# ─── Helpers to build the workout-service JSON ───────────────────────────
 
 RUNNING = {"sportTypeId": 1, "sportTypeKey": "running"}
 KM_UNIT = {"unitId": 2, "unitKey": "kilometer", "factor": 100000.0}
@@ -45,7 +45,7 @@ TARGET_NONE = {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target"}
 
 
 def pace_to_mps(pace_str: str) -> float:
-    """'5:05' (min/km) -> velocidad en m/s."""
+    """'5:05' (min/km) -> speed in m/s."""
     m, s = pace_str.split(":")
     return 1000.0 / (int(m) * 60 + int(s))
 
@@ -54,7 +54,7 @@ _step_order = 0
 
 
 def step(kind, dist_m=None, time_s=None, fast=None, slow=None, desc=None, child=None):
-    """Un paso ejecutable. fast/slow = banda de pace 'M:SS' (fast = límite rápido)."""
+    """An executable step. fast/slow = pace band 'M:SS' (fast = faster bound)."""
     global _step_order
     _step_order += 1
     s = {
@@ -75,7 +75,7 @@ def step(kind, dist_m=None, time_s=None, fast=None, slow=None, desc=None, child=
         s["endConditionValue"] = float(time_s)
     if fast and slow:
         s["targetType"] = TARGET_PACE
-        # Igual que Runna: targetValueOne = velocidad más alta (pace rápido)
+        # Same as Runna: targetValueOne = higher speed (faster pace)
         s["targetValueOne"] = pace_to_mps(fast)
         s["targetValueTwo"] = pace_to_mps(slow)
     else:
@@ -118,18 +118,18 @@ def reset_order():
     _step_order = 0
 
 
-# ─── Plan de workouts (workout_plan.py, local, gitignored) ─────────────────
+# ─── Workout plan (workout_plan.py, local, gitignored) ─────────────────
 
 def _load_build_workouts():
-    """Carga build_workouts() desde workout_plan.py, al lado del script, y le
-    inyecta el DSL step/repeat/workout/reset_order para que lo pueda usar sin
-    importar nada. Ver workout_plan.example.py para el formato esperado."""
+    """Loads build_workouts() from workout_plan.py, next to this script, and
+    injects the step/repeat/workout/reset_order DSL so it can be used without
+    importing anything. See workout_plan.example.py for the expected format."""
     path = Path(__file__).resolve().parent / "workout_plan.py"
     if not path.exists():
         raise SystemExit(
-            "Falta workout_plan.py al lado de este script.\n"
-            "Copia workout_plan.example.py -> workout_plan.py y escribi tu plan "
-            "(nunca se sube a git, ya esta en .gitignore)."
+            "Missing workout_plan.py next to this script.\n"
+            "Copy workout_plan.example.py -> workout_plan.py and write your plan "
+            "(never committed, already in .gitignore)."
         )
     spec = importlib.util.spec_from_file_location("workout_plan", path)
     module = importlib.util.module_from_spec(spec)
@@ -145,7 +145,7 @@ def _load_build_workouts():
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    print("Conectando a Garmin...")
+    print("Connecting to Garmin...")
     g = Garmin()
     g.login(tokenstore=GARMIN_TOKEN_DIR)
     print("Login OK")
@@ -157,23 +157,23 @@ def main():
         for name, wid in existing.items():
             if name.startswith(WORKOUT_PREFIX + " "):
                 g.delete_workout(wid)
-                print(f"Borrado: {name} ({wid})")
+                print(f"Deleted: {name} ({wid})")
                 deleted += 1
-        print(f"{deleted} workouts borrados.")
+        print(f"{deleted} workouts deleted.")
         return
 
     for wk, date_str in _load_build_workouts()():
         name = wk["workoutName"]
         if name in existing:
-            print(f"Ya existe, salteado: {name}")
+            print(f"Already exists, skipped: {name}")
             continue
         created = g.upload_workout(wk)
         wid = created.get("workoutId")
         g.schedule_workout(wid, date_str)
-        print(f"Creado y agendado {date_str}: {name} (id {wid})")
+        print(f"Created and scheduled {date_str}: {name} (id {wid})")
 
-    print("\nListo! Revisa Garmin Connect > Training & Planning > Workouts / Calendar.")
-    print("En el reloj: los workouts agendados aparecen en Entrenamiento > Calendario tras sincronizar.")
+    print("\nDone! Check Garmin Connect > Training & Planning > Workouts / Calendar.")
+    print("On the watch: scheduled workouts appear under Training > Calendar after syncing.")
 
 
 if __name__ == "__main__":

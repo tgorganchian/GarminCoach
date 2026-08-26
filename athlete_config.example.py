@@ -1,16 +1,16 @@
-"""Plantilla de config del atleta para sync.py / create_workouts.py.
+"""Athlete config template for sync.py / create_workouts.py.
 
-Copia este archivo a athlete_config.py (mismo directorio) y completa tus datos
-reales. athlete_config.py ya esta en .gitignore — nunca se sube a git.
+Copy this file to athlete_config.py (same directory) and fill in your real
+data. athlete_config.py is already in .gitignore — never committed to git.
 
-Los valores de abajo son de un atleta ficticio, solo para que el formato quede
-claro. Reemplazalos por los tuyos.
+The values below belong to a fictional athlete, just to show the expected
+format. Replace them with your own.
 """
 
 from datetime import datetime
 
-# HR zones (Karvonen: %HRR sobre HR reserva, no %HRmax) — deben coincidir con
-# lo que le digas a la skill en references/athlete-profile.md.
+# HR zones (Karvonen: %HRR over HR reserve, not %HRmax) — must match what
+# you tell the skill in references/athlete-profile.md.
 HR_ZONES = [
     ("Z1 Easy",    120, 135),
     ("Z2 Aerobic", 135, 150),
@@ -19,53 +19,69 @@ HR_ZONES = [
     ("Z5 Max",     180, 999),
 ]
 
-# Si cambiaste de zapatillas o de algo que afecte la interpretacion del HR,
-# documentalo aca — la skill lo usa para no confundir un HR mas bajo con
-# fitness ganado. Si no aplica, dejalo como string vacio: GEAR_CHANGES_SECTION = "".
+# If you changed shoes or anything else that affects how HR should be read,
+# document it here — the skill uses this to avoid mistaking a lower HR for
+# fitness gained. If it doesn't apply, leave it as an empty string: GEAR_CHANGES_SECTION = "".
 GEAR_CHANGE_DATE = datetime(2026, 1, 1)
 GEAR_CHANGES_SECTION = """\
 ## Gear Changes (Important for HR Interpretation)
 
 | Date (approx) | Change | Impact |
 |----------------|--------|--------|
-| 1 Jan 2026 | Ejemplo: zapatillas nuevas | Ejemplo: HR mas bajo en fondos desde esta fecha |
+| 1 Jan 2026 | Example: new shoes | Example: lower HR on easy runs since this date |
 """
 
-# Tus carreras — pasadas o futuras. La skill usa esto para el countdown y
-# para detectar carreras nuevas en el sync.
+# Your races — past or upcoming. The skill uses this for the countdown and
+# to detect new races during sync.
 RACE_CALENDAR = [
     {
-        "name": "10K de ejemplo",
+        "name": "Example 10K",
         "date": "2026-04-12",
         "distance_km": 10.0,
         "goal": "Sub-45min",
     },
 ]
 
-# A partir de que distancia (km) una sesion cuenta como "long run" para vos.
+# From what distance (km) a session counts as a "long run" for you.
 LONG_RUN_KM = 10.0
-# Pace de lap (min/km, decimal) para considerar un lap "de calidad" al
-# detectar sesiones sin depender solo del titulo.
+# Lap pace (min/km, decimal) to consider a lap "quality" when detecting
+# sessions without relying solely on the title.
 QUALITY_LAP_PACE_THRESHOLD = 5 + 30 / 60  # 5:30/km
 MIN_QUALITY_LAP_KM = 0.3
 
-# ─── VDOT / predicciones de carrera (formula de Jack Daniels) ──────────────
-# Tus mejores marcas reales, mas reciente al final si empatan distancia.
+# Keywords in the activity title that flag it as a quality session (matched
+# case-insensitively). Adjust this to the vocabulary you or your training
+# app use (Runna, TrainingPeaks, titles you set by hand, etc.) — entirely
+# up to you. Spanish entries are kept here since they're what this athlete's
+# own activity titles use; swap in whatever language yours are in.
+QUALITY_KEYWORDS = [
+    "interval", "tempo", "fartlek", "repetici", "series", "800m", "1000m",
+    "400m", "umbral", "threshold", "race", "carrera", "5k", "10k", "competencia",
+    "stairway", "pyramid", "piramide", "rolling", "cruise", "200m", "300m", "600m",
+]
+
+# ─── VDOT / race predictions (Jack Daniels formula) ──────────────
+# Your real best marks, most recent last if tied on distance.
 PERSONAL_RECORDS = [
     {"distance_m": 5000, "time_min": 25 + 0 / 60, "date": "2026-02-01", "label": "5K"},
     {"distance_m": 10000, "time_min": 52 + 0 / 60, "date": "2026-03-15", "label": "10K"},
 ]
 
-# ─── Tu plan de entrenamiento semana a semana ───────────────────────────────
-# Formato: {numero_de_semana: {"start": "YYYY-MM-DD", "mon"/"wed"/"fri"/"sun": {...} | None}}
-# Los dias sin sesion van en None. Los nombres de dia son fijos (mon/wed/fri/sun)
-# porque create_workouts.py y el parser de compliance los usan para matchear.
+# ─── Your week-by-week training plan ───────────────────────────────
+# Format: {week_number: {"start": "YYYY-MM-DD", "mon"/"tue"/"wed"/"thu"/"fri"/"sat"/"sun": {...} | None}}
+# Use any subset of the 7 days — whichever you actually train (see the
+# "Day availability" table in references/athlete-profile.md; if you're
+# chatting with the skill to build the plan, that's where you tell it which
+# days you have free). Days without a session go in as None or are simply omitted.
+# The day NAMES (mon/tue/wed/thu/fri/sat/sun) are fixed because
+# create_workouts.py and the compliance parser use them for matching — but
+# you can use any combination of them, they don't need to be 4 or exactly these.
 TRAINING_PLAN = {
     1: {"start": "2026-04-01", "mon": None, "wed": {"km": 6, "type": "Easy"}, "fri": {"km": 8, "type": "Tempo"}, "sun": {"km": 10, "type": "Long Run"}},
     2: {"start": "2026-04-08", "mon": {"km": 5, "type": "Easy"}, "wed": {"km": 6, "type": "Intervals"}, "fri": None, "sun": {"km": 12, "type": "Long Run"}},
 }
 
-# Coordenadas para el clima (Open-Meteo) — usadas para explicar HR/pace
-# anomalos por temperatura/humedad. Poné las de tu ciudad.
+# Coordinates for weather (Open-Meteo) — used to explain HR/pace anomalies
+# from temperature/humidity. Put your city's here.
 WEATHER_LAT = -34.6037
 WEATHER_LON = -58.3816
