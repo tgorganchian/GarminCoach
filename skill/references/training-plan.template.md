@@ -12,7 +12,10 @@
 
 Replace this section with your actual week-by-week sessions. One row per
 week keeps it easy to cross-reference against compliance in
-`training-history.md`.
+`training-history.md`. The column days below are just an example (a 4-day
+week) — use whichever days match your own "Day availability" table in
+`athlete-profile.md` and your `TRAINING_PLAN` in `athlete_config.py`; could
+be 3 days, could be 6.
 
 | Week | Mon | Wed | Fri | Sun | ~km |
 |---|---|---|---|---|---|

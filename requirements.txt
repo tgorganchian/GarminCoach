@@ -1,8 +1,15 @@
+# Core deps for sync.py and create_workouts.py.
+# For the optional voice-feedback pipeline (collect_feedback.py), see
+# requirements-feedback.txt instead — those deps are heavier (ML/CUDA) and
+# meant for a separate virtualenv (see docs/SETUP.md, step 6).
+
 # Upstream Garmin Connect client (429 / rate-limit fixes land here first)
 garminconnect @ git+https://github.com/cyberjunky/python-garminconnect.git
 
 python-dotenv>=1.0.0
+requests>=2.31.0
 
-google-api-python-client>=2.0.0
-google-auth-oauthlib>=1.0.0
-google-auth-httplib2>=0.2.0
+# Parses downloaded FIT files for the feeling/perceived-effort self-eval
+# (sync.py's fetch_fit_metrics) — required whenever FETCH_SELF_EVAL is True
+# (the default).
+fitparse>=1.2.0

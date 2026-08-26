@@ -111,6 +111,11 @@ _Not tracked yet._
 
 ### Day availability
 
+> If this is blank, ask the athlete which days they have free / want to run
+> before building or adapting `TRAINING_PLAN` in `athlete_config.py` — the
+> plan format supports any subset of the 7 days, it's not fixed to any
+> particular set.
+
 | Day | Available | Notes |
 |---|---|---|
 | Mon | | |

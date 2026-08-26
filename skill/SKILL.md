@@ -228,6 +228,9 @@ timeline (build/peak/taper — see `race-prep-phases.md`), race-day red flags.
 
 #### Training plan advice
 Weekly structure aligned to **day availability** in `athlete-profile.md`. If
+that table is blank, ask the athlete which days they're free / want to train
+before proposing a weekly structure — `TRAINING_PLAN` in `athlete_config.py`
+supports any subset of the 7 weekdays, so don't assume a fixed schedule. If
 the question is about a session in the current week, use the **adapted plan**
 in `training-plan.md` if one exists (it takes priority over the original
 plan). Taper if the race is under four weeks out.

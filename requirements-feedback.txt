@@ -1,0 +1,14 @@
+# Extra deps for the optional voice-feedback pipeline (collect_feedback.py).
+# Install these in a SEPARATE virtualenv from requirements.txt — faster-whisper
+# pulls in heavy ML dependencies you don't want mixed into the sync.py env.
+# See docs/SETUP.md, step 6.
+
+telethon>=1.34.0
+faster-whisper>=1.0.0
+
+# GPU only (device="cuda" in collect_feedback.py, the default). Skip these if
+# you switched DEVICE/COMPUTE to CPU near the top of the script — ctranslate2
+# then uses your system CPU and doesn't need CUDA at all.
+# nvidia-cublas-cu12
+# nvidia-cudnn-cu12
+# nvidia-cuda-nvrtc-cu12

@@ -79,13 +79,16 @@ git clone <this-repo> GarminCoach
 cd GarminCoach
 pip install -r requirements.txt
 
-cp .env.example .env                              # fill in your Garmin/Strava/Telegram creds and paths
+cp .env.example .env                              # fill in your Garmin/Telegram creds and paths
 cp athlete_config.example.py athlete_config.py     # fill in your HR zones, PRs, race calendar, training plan
 cp workout_plan.example.py workout_plan.py         # optional, only needed for create_workouts.py
 
 python sync.py                 # first run pulls your full history; later runs are incremental
 python create_workouts.py      # optional: pushes your structured workouts to Garmin Connect
-python collect_feedback.py --login   # optional: one-time Telegram auth for voice feedback
+
+# optional voice-feedback pipeline — separate venv, see docs/SETUP.md step 6
+pip install -r requirements-feedback.txt
+python collect_feedback.py --login   # one-time Telegram auth
 ```
 
 `athlete_config.py`, `workout_plan.py`, and `.env` are already in
@@ -96,7 +99,7 @@ to the scripts, and they never get committed.
 
 | File | What goes in it |
 |---|---|
-| `.env` | Garmin login, file paths, and optional Strava/Telegram credentials. See `.env.example`. |
+| `.env` | Garmin login, file paths, and optional Telegram credentials (voice feedback). See `.env.example`. |
 | `athlete_config.py` | HR zones, personal records, race calendar, your week-by-week training plan. See `athlete_config.example.py`. |
 | `workout_plan.py` | The actual structured workouts `create_workouts.py` schedules — written with the `step`/`repeat`/`workout` DSL. See `workout_plan.example.py`. Only needed if you use `create_workouts.py`. |
 

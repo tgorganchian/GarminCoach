@@ -21,8 +21,10 @@ cp .env.example .env
 - `CSV_PATH` / `GARMIN_TOKEN_DIR` / `TRAINING_HISTORY_PATH` — absolute paths.
   `TRAINING_HISTORY_PATH` should point at wherever your coaching skill's
   `references/training-history.md` lives.
-- Strava and Telegram variables are optional — leave them blank if you don't
-  use shoe-mileage tracking or voice feedback.
+- Telegram variables are optional — leave them blank if you don't use voice
+  feedback. (Shoe-mileage tracking via Strava isn't implemented — the API
+  now requires a paid developer subscription — so there's no `.env` variable
+  for it.)
 
 ## 3. Configure your athlete data
 
@@ -81,21 +83,26 @@ model.
 1. **Get Telegram API credentials** — go to <https://my.telegram.org>, log
    in, create an app, and copy the `api_id` / `api_hash` into `.env`
    (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`).
-2. **Authenticate once**:
+2. **Use a separate virtualenv for this one.** `faster-whisper` pulls in
+   heavy ML dependencies (CUDA libraries) you probably don't want mixed into
+   the environment you use for `sync.py`. Create a dedicated venv, activate
+   it, then install:
+   ```bash
+   pip install -r requirements-feedback.txt
+   ```
+3. **GPU vs. CPU** — `collect_feedback.py` defaults to `device="cuda"` with
+   `faster-whisper`. If you have an NVIDIA GPU, also install the three
+   `nvidia-*-cu12` packages commented at the bottom of
+   `requirements-feedback.txt`. If you don't have a GPU, edit `DEVICE` and
+   `COMPUTE` near the top of the script instead (e.g. `device="cpu"`,
+   `compute_type="int8"`) — it'll be slower but works fine for occasional use.
+4. **Authenticate once**:
    ```bash
    python collect_feedback.py --login
    ```
    This asks for your phone number and the code Telegram sends you (inside
    the app, not SMS). It saves a session file locally — that file is a
    credential, keep it out of git (already covered by `.gitignore`).
-3. **GPU vs. CPU** — `collect_feedback.py` defaults to `device="cuda"` with
-   `faster-whisper`. If you don't have an NVIDIA GPU, edit `DEVICE` and
-   `COMPUTE` near the top of the script (e.g. `device="cpu"`,
-   `compute_type="int8"`) — it'll be slower but works fine for occasional use.
-4. **Consider a separate virtualenv for this one.** `faster-whisper` pulls in
-   heavy ML dependencies (CUDA libraries) you probably don't want mixed into
-   the environment you use for `sync.py`. A dedicated venv just for
-   `collect_feedback.py` keeps the two clean.
 5. **Run it**:
    ```bash
    python collect_feedback.py            # pulls new voice notes, transcribes, queues them
