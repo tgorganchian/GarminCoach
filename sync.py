@@ -521,8 +521,15 @@ def compute_plan_compliance(acts, plan):
 
 # ─── WEATHER ─────────────────────────────────────────────────
 
-def fetch_weather_for_dates(dates):
-    """Fetch daily temperature and humidity from Open-Meteo for a list of dates.
+# Coordinates are rounded to this many decimals before grouping activities
+# into a weather-fetch location. 2 decimals (~1km) is already finer than the
+# archive API's native grid (~9-11km) — more precision wouldn't add signal,
+# it would just fragment nearby runs into separate API calls.
+WEATHER_COORD_DECIMALS = 2
+
+
+def fetch_weather_for_location(lat, lon, dates):
+    """Fetch daily temperature and humidity from Open-Meteo for a list of dates at one location.
     Returns dict {date_str: {"temp_c": float, "humidity_pct": int}}."""
     if not dates:
         return {}
@@ -533,8 +540,8 @@ def fetch_weather_for_dates(dates):
         resp = requests.get(
             "https://archive-api.open-meteo.com/v1/archive",
             params={
-                "latitude": WEATHER_LAT,
-                "longitude": WEATHER_LON,
+                "latitude": lat,
+                "longitude": lon,
                 "start_date": start,
                 "end_date": end,
                 "daily": "temperature_2m_mean,relative_humidity_2m_mean",
@@ -1400,6 +1407,9 @@ def main():
             secs = int((pace_decimal - mins) * 60)
             avg_pace = f"{mins}:{secs:02d}"
 
+        start_lat = act.get("startLatitude")
+        start_lon = act.get("startLongitude")
+
         new_rows.append({
             "activity_id": act.get("activityId", ""),
             "date": date,
@@ -1418,6 +1428,8 @@ def main():
             "perceived_effort": "",
             "weather_temp_c": "",
             "weather_humidity_pct": "",
+            "weather_lat": round(start_lat, WEATHER_COORD_DECIMALS) if start_lat is not None else "",
+            "weather_lon": round(start_lon, WEATHER_COORD_DECIMALS) if start_lon is not None else "",
         })
 
     if not new_rows:
@@ -1445,16 +1457,33 @@ def main():
                     time.sleep(0.5)
 
     # ── Fetch weather for activities missing it ─────────
+    # Grouped by each activity's own start coordinates (falling back to
+    # WEATHER_LAT/WEATHER_LON for older rows or GPS-less activities), so an
+    # athlete who runs in different parts of a city gets weather for where
+    # they actually ran, not one fixed point.
     weather_missing = [r for r in all_rows if r.get("weather_temp_c", "") in ("", None)]
     if weather_missing:
-        dates_to_fetch = [r["date"][:10] for r in weather_missing]
-        print(f"Fetching weather for {len(set(dates_to_fetch))} dates...", flush=True)
-        weather_data = fetch_weather_for_dates(dates_to_fetch)
+        location_groups = defaultdict(list)
         for row in weather_missing:
-            d = row["date"][:10]
-            if d in weather_data:
-                row["weather_temp_c"] = weather_data[d].get("temp_c", "")
-                row["weather_humidity_pct"] = weather_data[d].get("humidity_pct", "")
+            lat = _float_or_none(row.get("weather_lat", ""), ndigits=WEATHER_COORD_DECIMALS)
+            lon = _float_or_none(row.get("weather_lon", ""), ndigits=WEATHER_COORD_DECIMALS)
+            if lat is None or lon is None:
+                lat, lon = WEATHER_LAT, WEATHER_LON
+            location_groups[(lat, lon)].append(row)
+
+        print(
+            f"Fetching weather for {len(weather_missing)} activities "
+            f"across {len(location_groups)} location(s)...",
+            flush=True,
+        )
+        for (lat, lon), rows_at_location in location_groups.items():
+            dates_to_fetch = [r["date"][:10] for r in rows_at_location]
+            weather_data = fetch_weather_for_location(lat, lon, dates_to_fetch)
+            for row in rows_at_location:
+                d = row["date"][:10]
+                if d in weather_data:
+                    row["weather_temp_c"] = weather_data[d].get("temp_c", "")
+                    row["weather_humidity_pct"] = weather_data[d].get("humidity_pct", "")
 
     # Rewrite the full sorted CSV
     fieldnames = [
@@ -1463,7 +1492,7 @@ def main():
         "avg_heart_rate", "max_heart_rate", "elevation_gain_m", "cadence", "calories",
         "stride_length_m", "vo2max",
         "feeling", "perceived_effort",
-        "weather_temp_c", "weather_humidity_pct",
+        "weather_temp_c", "weather_humidity_pct", "weather_lat", "weather_lon",
     ]
 
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:

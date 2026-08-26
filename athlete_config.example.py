@@ -81,7 +81,9 @@ TRAINING_PLAN = {
     2: {"start": "2026-04-08", "mon": {"km": 5, "type": "Easy"}, "wed": {"km": 6, "type": "Intervals"}, "fri": None, "sun": {"km": 12, "type": "Long Run"}},
 }
 
-# Coordinates for weather (Open-Meteo) — used to explain HR/pace anomalies
-# from temperature/humidity. Put your city's here.
+# Fallback coordinates for weather (Open-Meteo) — used to explain HR/pace
+# anomalies from temperature/humidity. sync.py prefers each activity's own
+# GPS start coordinates; these are only used when an activity has none
+# (treadmill, indoor, GPS didn't lock). Put your city's here.
 WEATHER_LAT = -34.6037
 WEATHER_LON = -58.3816
