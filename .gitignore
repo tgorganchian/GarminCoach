@@ -1,23 +1,24 @@
 # Real config and secrets — never committed. See the *.example / *.template files for the format.
-.env
-.env.bak
-athlete_config.py
-workout_plan.py
+/.env
+/.env.bak
+/athlete_config.py
+# Kept ignored for people migrating from the retired workout DSL.
+/workout_plan.py
 
-# Data generated on each sync — yours, not the repo's.
-*.csv
-feedback/
-garmin_tokens/
-credentials.json
-token.json
+# Local coaching state and data — never committed.
+/coaching/
+/data/
+/*.csv
+/feedback/
+/garmin_tokens/
+/credentials.json
+/token.json
 
 # Python
-__pycache__/
+**/__pycache__/
 *.pyc
-.venv/
-.venv-whisper/
+/.venv/
+/.venv-whisper/
 
-# Working copies of the skill templates (if you try the skill out right here).
-skill/references/*.md
-!skill/references/*.template.md
-!skill/references/example/
+# Agent working notes are local, not product documentation.
+/docs/superpowers/

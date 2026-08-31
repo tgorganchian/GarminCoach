@@ -1,7 +1,7 @@
 # Extra deps for the optional voice-feedback pipeline (collect_feedback.py).
 # Install these in a SEPARATE virtualenv from requirements.txt — faster-whisper
 # pulls in heavy ML dependencies you don't want mixed into the sync.py env.
-# See docs/SETUP.md, step 6.
+# See GUIDE.md's optional voice-feedback section.
 
 telethon>=1.34.0
 faster-whisper>=1.0.0

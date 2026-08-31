@@ -1,0 +1,16 @@
+# Local GarminCoach state — never commit.
+/.env
+/.env.bak
+/athlete_config.py
+/coaching/
+/data/
+/feedback/
+/garmin_tokens/
+/credentials.json
+/token.json
+
+# Python and local environments.
+**/__pycache__/
+*.pyc
+/.venv/
+/.venv-whisper/

@@ -1,4 +1,5 @@
 import io
+import json
 import math
 import os
 import re
@@ -12,20 +13,20 @@ from pathlib import Path
 
 import requests
 
-from dotenv import load_dotenv
 from garminconnect import Garmin
 
-# Load variables from .env in the script's folder (if it exists)
-load_dotenv(Path(__file__).resolve().parent / ".env")
+from garmin_coach.paths import load_project_env, project_paths
+from garmin_coach.plan import PlanValidationError, TrainingPlan, no_active_plan, parse_training_plan
+from garmin_coach.readiness import is_ready, readiness
+from garmin_workouts import load_manifest, managed_coverage_days
+
+# Load local variables without imposing machine-specific absolute paths.
+PATHS = load_project_env(project_paths())
 
 try:
     import athlete_config as cfg
 except ModuleNotFoundError:
-    raise SystemExit(
-        "Missing athlete_config.py next to this script.\n"
-        "Copy athlete_config.example.py -> athlete_config.py and fill in your data "
-        "(never committed, already in .gitignore)."
-    )
+    cfg = None
 
 # ─── CONFIG ───────────────────────────────────────────────
 GARMIN_EMAIL = os.getenv("GARMIN_EMAIL")
@@ -47,25 +48,26 @@ FETCH_SELF_EVAL = True
 # Set True ONCE to fetch self-eval for ALL historical activities; then set back to False
 BACKFILL_SELF_EVAL = False
 
-CSV_PATH = os.getenv("CSV_PATH")
-GARMIN_TOKEN_DIR = os.getenv("GARMIN_TOKEN_DIR")
-TRAINING_HISTORY_PATH = os.getenv("TRAINING_HISTORY_PATH")
-# Derived automatically — same folder as activities.csv
-LAPS_CSV_PATH = str(Path(CSV_PATH).parent / "activity_laps.csv") if CSV_PATH else None
+CSV_PATH = str(PATHS.activities_csv)
+GARMIN_TOKEN_DIR = str(PATHS.token_dir)
+TRAINING_HISTORY_PATH = str(PATHS.training_history)
+LAPS_CSV_PATH = str(PATHS.laps_csv)
 
 # ─── Athlete config (athlete_config.py, local, gitignored) ──────────────
-GEAR_CHANGES_SECTION = cfg.GEAR_CHANGES_SECTION
-HR_ZONES = cfg.HR_ZONES
-GEAR_CHANGE_DATE = cfg.GEAR_CHANGE_DATE
-RACE_CALENDAR = cfg.RACE_CALENDAR
-LONG_RUN_KM = cfg.LONG_RUN_KM
-QUALITY_LAP_PACE_THRESHOLD = cfg.QUALITY_LAP_PACE_THRESHOLD
-MIN_QUALITY_LAP_KM = cfg.MIN_QUALITY_LAP_KM
-QUALITY_KEYWORDS = cfg.QUALITY_KEYWORDS
-PERSONAL_RECORDS = cfg.PERSONAL_RECORDS
-TRAINING_PLAN = cfg.TRAINING_PLAN
-WEATHER_LAT = cfg.WEATHER_LAT
-WEATHER_LON = cfg.WEATHER_LON
+GEAR_CHANGES_SECTION = getattr(cfg, "GEAR_CHANGES_SECTION", "")
+HR_ZONES = getattr(cfg, "HR_ZONES", [])
+GEAR_CHANGE_DATE = getattr(cfg, "GEAR_CHANGE_DATE", None)
+RACE_CALENDAR = getattr(cfg, "RACE_CALENDAR", [])
+LONG_RUN_KM = getattr(cfg, "LONG_RUN_KM", 0)
+QUALITY_LAP_PACE_THRESHOLD = getattr(cfg, "QUALITY_LAP_PACE_THRESHOLD", 0)
+MIN_QUALITY_LAP_KM = getattr(cfg, "MIN_QUALITY_LAP_KM", 0)
+QUALITY_KEYWORDS = getattr(cfg, "QUALITY_KEYWORDS", [])
+PERSONAL_RECORDS = getattr(cfg, "PERSONAL_RECORDS", [])
+WEATHER_LAT = getattr(cfg, "WEATHER_LAT", None)
+WEATHER_LON = getattr(cfg, "WEATHER_LON", None)
+WEATHER_TIMEZONE = getattr(cfg, "WEATHER_TIMEZONE", "auto") or "auto"
+ACTIVE_PLAN: TrainingPlan = no_active_plan()
+PLAN_ERROR: str | None = None
 # ──────────────────────────────────────────────────────────
 
 
@@ -439,83 +441,62 @@ def compute_vdot_section(personal_records):
 
 # ─── PLAN COMPLIANCE ─────────────────────────────────────────
 
-_PLAN_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
-
-def _parse_week_from_title(title):
-    """Extract week number and day from a plan title like 'W2 Mon Tempo...'.
-    Matches whichever of the 7 weekdays the athlete actually trains on — see
-    TRAINING_PLAN in athlete_config.py."""
-    m = re.search(r"W(\d+)\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)", title)
-    if not m:
-        return None, None
-    return int(m.group(1)), m.group(2).lower()
+def _matches_plan_session(activity, session):
+    """Attribute only an unambiguous activity on the planned date."""
+    if activity["date"].date() != session.date:
+        return False
+    title = activity.get("title", "").lower()
+    return session.id.lower() in title or session.name.lower() in title
 
 
 def compute_plan_compliance(acts, plan):
-    """Compare completed activities against the training plan."""
-    completed = defaultdict(dict)
-    for a in acts:
-        week, day = _parse_week_from_title(a["title"])
-        if week and day and week in plan:
-            # Only match if activity date falls within this plan week's date range.
-            # This prevents old Runna-plan activities (same W# format) from polluting
-            # compliance for the current plan.
-            wk_start = datetime.strptime(plan[week]["start"], "%Y-%m-%d")
-            wk_end = wk_start + timedelta(days=6)
-            if not (wk_start <= a["date"] <= wk_end):
-                continue
-            completed[week][day] = {
-                "km": a["distance_km"],
-                "pace": a["avg_pace"],
-                "hr": a["avg_hr"],
-                "date": a["date"],
-                "title": a["title"],
-            }
+    """Compare completed activities against validated, dated PLAN-DATA sessions."""
+    if not plan.is_active:
+        return []
+    completed = {}
+    for session in plan.sessions:
+        matches = [activity for activity in acts if _matches_plan_session(activity, session)]
+        if len(matches) == 1:
+            completed[session.id] = matches[0]
 
     weeks = []
-    for wk_num in sorted(plan.keys()):
-        wk = plan[wk_num]
-        planned_sessions = 0
-        completed_sessions = 0
+    for week_num, (week_start, sessions) in enumerate(sorted(plan.sessions_by_week().items()), start=1):
         details = []
-        for day in _PLAN_DAYS:
-            planned = wk.get(day)
-            if planned is None:
-                continue
-            planned_sessions += 1
-            done = completed.get(wk_num, {}).get(day)
+        completed_count = 0
+        for session in sessions:
+            planned_km = session.planned_distance_m / 1000 if session.planned_distance_m is not None else None
+            done = completed.get(session.id)
             if done:
-                completed_sessions += 1
-                km_diff = done["km"] - planned["km"]
+                completed_count += 1
+                km_diff = done["distance_km"] - planned_km if planned_km is not None else None
                 details.append({
-                    "day": day.capitalize(),
-                    "planned_type": planned["type"],
-                    "planned_km": planned["km"],
-                    "actual_km": done["km"],
+                    "day": session.date.strftime("%a"),
+                    "planned_type": session.name,
+                    "planned_km": planned_km,
+                    "actual_km": done["distance_km"],
                     "km_diff": km_diff,
-                    "pace": done["pace"],
+                    "pace": done["avg_pace"],
                     "status": "✅",
                 })
             else:
                 details.append({
-                    "day": day.capitalize(),
-                    "planned_type": planned["type"],
-                    "planned_km": planned["km"],
+                    "day": session.date.strftime("%a"),
+                    "planned_type": session.name,
+                    "planned_km": planned_km,
                     "actual_km": None,
                     "km_diff": None,
                     "pace": None,
                     "status": "⬜",
                 })
-        if planned_sessions > 0:
-            weeks.append({
-                "week": wk_num,
-                "start": wk["start"],
-                "planned": planned_sessions,
-                "completed": completed_sessions,
-                "pct": int(completed_sessions / planned_sessions * 100),
-                "details": details,
-            })
+        weeks.append({
+            "week": week_num,
+            "start": week_start.isoformat(),
+            "planned": len(sessions),
+            "completed": completed_count,
+            "pct": int(completed_count / len(sessions) * 100),
+            "details": details,
+        })
     return weeks
 
 
@@ -545,7 +526,7 @@ def fetch_weather_for_location(lat, lon, dates):
                 "start_date": start,
                 "end_date": end,
                 "daily": "temperature_2m_mean,relative_humidity_2m_mean",
-                "timezone": "America/Argentina/Buenos_Aires",
+                "timezone": WEATHER_TIMEZONE,
             },
             timeout=15,
         )
@@ -1061,7 +1042,7 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
         )
 
     # ── Plan Compliance ──────────────────────────────────
-    compliance_weeks = compute_plan_compliance(acts, TRAINING_PLAN)
+    compliance_weeks = compute_plan_compliance(acts, ACTIVE_PLAN)
     compliance_md = ""
     if compliance_weeks:
         today_date = today.date()
@@ -1088,18 +1069,20 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
             for d in wk["details"]:
                 if d["actual_km"] is not None:
                     km_diff = f"{d['km_diff']:+.1f}" if d["km_diff"] else "0"
+                    planned = f"{d['planned_km']:.1f}" if d["planned_km"] is not None else "—"
                     detail_rows.append(
-                        f"| W{wk['week']} {d['day']} | {d['planned_type']} | {d['planned_km']} | "
+                        f"| W{wk['week']} {d['day']} | {d['planned_type']} | {planned} | "
                         f"{d['actual_km']:.1f} | {km_diff} | {d['pace'] or '—'} | {d['status']} |"
                     )
                 else:
+                    planned = f"{d['planned_km']:.1f}" if d["planned_km"] is not None else "—"
                     detail_rows.append(
-                        f"| W{wk['week']} {d['day']} | {d['planned_type']} | {d['planned_km']} | "
+                        f"| W{wk['week']} {d['day']} | {d['planned_type']} | {planned} | "
                         f"— | — | — | {d['status']} |"
                     )
 
         compliance_md = (
-            f"## Plan Compliance ({len(TRAINING_PLAN)}-week plan)\n\n"
+            f"## Plan Compliance ({len(ACTIVE_PLAN.sessions_by_week())}-week plan)\n\n"
             f"### Weekly Summary\n\n"
             f"| Week | Sessions | Completion |\n"
             f"|------|----------|------------|\n"
@@ -1316,6 +1299,7 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
 
 
 def main():
+    global ACTIVE_PLAN, PLAN_ERROR
     # Avoids a blank console (e.g. when opening the .py via Windows file association)
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
@@ -1323,6 +1307,20 @@ def main():
             sys.stderr.reconfigure(line_buffering=True)
         except Exception:
             pass
+
+    requirements = readiness(PATHS)
+    if not is_ready(requirements, "sync"):
+        print("Sync setup is incomplete. Run: python setup_status.py --json", flush=True)
+        for item in requirements:
+            if "sync" in item.required_for and item.state != "ready":
+                print(f"- {item.name}: {item.remediation}", flush=True)
+        return 2
+    try:
+        ACTIVE_PLAN = parse_training_plan(PATHS.training_plan)
+    except PlanValidationError as exc:
+        PLAN_ERROR = str(exc)
+        ACTIVE_PLAN = no_active_plan()
+        print(f"Warning: plan compliance skipped: {PLAN_ERROR}", flush=True)
 
     # Connect to Garmin
     print("Connecting to Garmin...", flush=True)
@@ -1564,6 +1562,14 @@ def main():
 
     # Regenerate training-history.md with fresh data
     generate_training_history(all_rows, laps_rows, race_predictions)
+
+    if ACTIVE_PLAN.is_active:
+        try:
+            coverage = managed_coverage_days(load_manifest(PATHS.workout_manifest), datetime.today().date())
+            if coverage < 14:
+                print(f"Managed Garmin workout coverage is {coverage} days. Ask whether to preview the next 14 days.", flush=True)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"Warning: workout coverage could not be checked: {exc}", flush=True)
 
     # ── Auto-update athlete-profile.md ────────────────────
     profile_path = str(Path(TRAINING_HISTORY_PATH).parent / "athlete-profile.md") if TRAINING_HISTORY_PATH else None

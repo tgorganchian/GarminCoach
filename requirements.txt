@@ -1,7 +1,7 @@
-# Core deps for sync.py and create_workouts.py.
+# Core dependencies for GarminCoach sync and workout rendering.
 # For the optional voice-feedback pipeline (collect_feedback.py), see
 # requirements-feedback.txt instead — those deps are heavier (ML/CUDA) and
-# meant for a separate virtualenv (see docs/SETUP.md, step 6).
+# meant for a separate virtualenv (see GUIDE.md).
 
 # Upstream Garmin Connect client (429 / rate-limit fixes land here first)
 garminconnect @ git+https://github.com/cyberjunky/python-garminconnect.git

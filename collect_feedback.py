@@ -1,7 +1,6 @@
 """
-Collects voice notes from Telegram Saved Messages, transcribes them with
-faster-whisper, and drops them in feedback/pending.jsonl so the
-running-coach skill can fold them into the weekly Obsidian log.
+Collects optional voice notes from Telegram Saved Messages and writes a local
+queue that the coaching journal can associate safely with a reviewed session.
 
 Usage:
     python collect_feedback.py --login    -> initial authentication (one-time, interactive)
@@ -38,6 +37,7 @@ from dotenv import load_dotenv
 from telethon.sync import TelegramClient
 
 BASE = Path(__file__).parent
+load_dotenv(BASE / ".env")
 FEEDBACK = BASE / "feedback"
 AUDIOS = FEEDBACK / "audios"
 PENDING = FEEDBACK / "pending.jsonl"
@@ -48,15 +48,9 @@ MODEL = os.environ.get("WHISPER_MODEL", "medium")
 COMPUTE = "int8_float16"
 DEVICE = "cuda"
 
-# Vocabulary passed to Whisper as a context hint (improves transcription of
-# running jargon and injury/muscle names). Written in Spanish because it's
-# tuned for Spanish-language voice notes — override with WHISPER_PROMPT in
-# .env to match your own language and vocabulary (injuries you're carrying,
-# session names you use, etc.), entirely up to you.
-PROMPT = os.environ.get("WHISPER_PROMPT") or (
-    "Entrenamiento de running. Ritmo, pace, kilometros, series, intervalos, "
-    "tempo, fondo, trote regenerativo, umbral, pulsaciones, zancada, cadencia."
-)
+# Language and vocabulary are optional local choices. No language is assumed.
+PROMPT = os.environ.get("WHISPER_PROMPT") or None
+LANGUAGE = os.environ.get("WHISPER_LANGUAGE") or None
 
 # Safety cap: if it's never been run before, don't pull the entire Saved
 # Messages history at once. The first run only looks at the last N messages.
@@ -107,15 +101,17 @@ def load_model():
 
 
 def transcribe(model, path: Path) -> str:
-    segments, _ = model.transcribe(
-        str(path),
-        language="es",
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-        condition_on_previous_text=False,
-        initial_prompt=PROMPT,
-    )
+    options = {
+        "beam_size": 5,
+        "vad_filter": True,
+        "vad_parameters": {"min_silence_duration_ms": 500},
+        "condition_on_previous_text": False,
+    }
+    if LANGUAGE:
+        options["language"] = LANGUAGE
+    if PROMPT:
+        options["initial_prompt"] = PROMPT
+    segments, _ = model.transcribe(str(path), **options)
     return " ".join(s.text.strip() for s in segments).strip()
 
 
