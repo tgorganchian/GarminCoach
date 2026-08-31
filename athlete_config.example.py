@@ -6,6 +6,8 @@ coaching/training-plan.md, never in this file.
 """
 
 HR_ZONES = []
+# Optional manual date for a pre/post-gear HR comparison. Garmin gear tracking
+# works without this setting.
 GEAR_CHANGE_DATE = None
 GEAR_CHANGES_SECTION = ""
 RACE_CALENDAR = []

@@ -46,7 +46,7 @@ echo credentials or tokens.
 | Requirement | Location | Required for |
 | --- | --- | --- |
 | Garmin credentials and local paths | `.env` | Sync, not guided setup |
-| Zones, records, calendar, classifiers, weather fallback | `athlete_config.py` | Data-driven sync |
+| Zones, records, calendar, classifiers, and optional weather fallback | `athlete_config.py` | Data-driven sync |
 | Profile and coaching references | `coaching/` | Normal coaching |
 | Journal root | `coaching/journal/` by default | Normal coaching |
 | Active training plan | `coaching/training-plan.md` | Only plan/render operations |
@@ -93,6 +93,36 @@ remain visible and versionable.
   horizon, and applies only a confirmed manifest-owned preview.
 - `skills/` routes coaching through session/race review, mandatory journal
   sync, pattern review, plan work, and explicit Garmin workout requests.
+
+### Garmin backfill rate limits
+
+An initial sync imports detailed data for every historical workout, so it can
+normally take several minutes. This is expected; keep the process running while
+it works. Later incremental syncs are much faster because they process the
+recent overlap and newly recorded activities. If Garmin temporarily limits the
+sync, let it finish or try again later. To retry missing historical laps
+explicitly, set `BACKFILL_LAPS = True` for one run and then set it back to
+`False`.
+
+### Gear, shoes, and weather gaps
+
+`GEAR_CHANGE_DATE` is optional: leaving it unset does not block setup or sync.
+When gear is tracked in Garmin Connect, the generated history summarizes the
+kilometres represented in the local running history.
+
+The blank public configuration intentionally leaves long-run and quality-lap
+thresholds unset. In that state, those analyses are omitted rather than
+blocking the generated history; set the values only when the athlete has
+confirmed them.
+
+For shoe history tracked only in Strava, an already-authorized Strava API or
+MCP integration in the user's agent can read the activity gear directly. Never
+share OAuth tokens in chat. Otherwise, request the complete archive ZIP from
+the Strava website, then wait for the download link that Strava sends by email
+before attaching the ZIP to the agent. Its activity export can be matched with
+the Garmin history to reconstruct kilometres per shoe. Activities without
+location data can remain without weather; define `WEATHER_LAT` and
+`WEATHER_LON` to use a fallback location.
 
 Once sync readiness is complete, `running-coach` runs `sync.py` before
 data-dependent advice. Sync writes Garmin facts and generated history; skills

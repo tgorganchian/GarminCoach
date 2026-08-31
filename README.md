@@ -61,7 +61,7 @@ history, journal, tokens, and feedback; that private state is ignored by Git.
 
 | Command | Purpose |
 | --- | --- |
-| `sync.py` | Fetch Garmin facts and generate training history. |
+| `sync.py` | Fetch Garmin facts, Garmin gear mileage when available, and generate training history; an initial historical sync can take longer. |
 | `setup_status.py` | Report missing local configuration without printing secrets. |
 | `garmin_workouts.py` | Preview and apply confirmed plan workouts. |
 | `collect_feedback.py` | Optionally collect and transcribe Telegram voice notes. |

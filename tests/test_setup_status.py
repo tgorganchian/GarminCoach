@@ -33,3 +33,12 @@ class SetupStatusTests(unittest.TestCase):
         self.assertEqual("not-active", states["training-plan"])
         self.assertTrue(is_ready(items, "coaching"))
         self.assertFalse(is_ready(items, "render"))
+
+    def test_config_without_gear_does_not_block_sync(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".env").write_text("GARMIN_EMAIL=a\nGARMIN_PASSWORD=b\n", encoding="utf-8")
+            (root / "athlete_config.py").write_text("HR_ZONES = []\n", encoding="utf-8")
+            items = readiness(project_paths(root))
+
+        self.assertTrue(is_ready(items, "sync"))

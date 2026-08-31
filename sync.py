@@ -13,7 +13,7 @@ from pathlib import Path
 
 import requests
 
-from garminconnect import Garmin
+from garminconnect import Garmin, GarminConnectTooManyRequestsError
 
 from garmin_coach.paths import load_project_env, project_paths
 from garmin_coach.plan import PlanValidationError, TrainingPlan, no_active_plan, parse_training_plan
@@ -47,6 +47,13 @@ BACKFILL_LAPS = False
 FETCH_SELF_EVAL = True
 # Set True ONCE to fetch self-eval for ALL historical activities; then set back to False
 BACKFILL_SELF_EVAL = False
+# Delay between per-activity Garmin requests during first sync/backfills. At
+# three seconds this caps each sequential batch at 20 requests per minute.
+GARMIN_ACTIVITY_REQUEST_INTERVAL_SECONDS = 3.0
+# A 429 means Garmin's server-side quota is already exhausted. Pause before
+# retrying instead of discarding the activity's data.
+GARMIN_RATE_LIMIT_RETRY_WAIT_SECONDS = 120
+GARMIN_RATE_LIMIT_MAX_RETRIES = 3
 
 CSV_PATH = str(PATHS.activities_csv)
 GARMIN_TOKEN_DIR = str(PATHS.token_dir)
@@ -157,6 +164,8 @@ def _is_quality(a, quality_keywords):
 
 def _has_quality_lap(a, laps_by_id):
     """True if any meaningful lap has pace ≤ QUALITY_LAP_PACE_THRESHOLD."""
+    if not MIN_QUALITY_LAP_KM or not QUALITY_LAP_PACE_THRESHOLD:
+        return False
     aid = str(a.get("activity_id") or "").strip()
     if not aid or aid not in laps_by_id:
         return False
@@ -247,6 +256,8 @@ def compute_acwr(acts, end_date):
 
 
 def compute_easy_hr_baseline(acts, quality_keywords):
+    if not GEAR_CHANGE_DATE:
+        return None, None
     easy = [a for a in acts if _is_easy(a, quality_keywords) and a["avg_hr"]]
     pre = [a for a in easy if a["date"] < GEAR_CHANGE_DATE]
     post = [a for a in easy if a["date"] >= GEAR_CHANGE_DATE]
@@ -296,6 +307,8 @@ def compute_pace_by_zone(acts):
 
 
 def identify_long_runs(acts, threshold_km=LONG_RUN_KM, n=10):
+    if not threshold_km:
+        return []
     lrs = [a for a in acts if a["distance_km"] >= threshold_km]
     lrs.sort(key=lambda x: x["date"], reverse=True)
     return lrs[:n]
@@ -512,7 +525,7 @@ WEATHER_COORD_DECIMALS = 2
 def fetch_weather_for_location(lat, lon, dates):
     """Fetch daily temperature and humidity from Open-Meteo for a list of dates at one location.
     Returns dict {date_str: {"temp_c": float, "humidity_pct": int}}."""
-    if not dates:
+    if lat is None or lon is None or not dates:
         return {}
     date_strs = sorted(set(d.strftime("%Y-%m-%d") if isinstance(d, datetime) else d for d in dates))
     start = date_strs[0]
@@ -608,10 +621,36 @@ def _lap_summary(activity_id, laps_by_id):
     return f"{len(laps)} laps · best {best} · avg {avg}"
 
 
+def _retry_after_rate_limit(request, request_target, resource):
+    """Run one Garmin request, waiting before bounded retries after a 429."""
+    for attempt in range(1, GARMIN_RATE_LIMIT_MAX_RETRIES + 1):
+        try:
+            return request()
+        except GarminConnectTooManyRequestsError:
+            if attempt == GARMIN_RATE_LIMIT_MAX_RETRIES:
+                print(
+                    f"  Warning: {resource} for {request_target} skipped after "
+                    f"{attempt} rate-limit responses",
+                    flush=True,
+                )
+                return None
+            print(
+                f"  Garmin rate limit while fetching {resource} for {request_target}; "
+                f"waiting {GARMIN_RATE_LIMIT_RETRY_WAIT_SECONDS}s before retry "
+                f"{attempt + 1}/{GARMIN_RATE_LIMIT_MAX_RETRIES}",
+                flush=True,
+            )
+            time.sleep(GARMIN_RATE_LIMIT_RETRY_WAIT_SECONDS)
+
+
 def fetch_activity_laps(client, activity_id):
     """Fetch lap splits for a single activity from Garmin. Returns list of lap dicts."""
     try:
-        data = client.get_activity_splits(activity_id)
+        data = _retry_after_rate_limit(
+            lambda: client.get_activity_splits(activity_id), activity_id, "laps"
+        )
+        if data is None:
+            return []
         if isinstance(data, dict):
             lap_list = data.get("lapDTOs", data.get("laps", []))
         elif isinstance(data, list):
@@ -663,7 +702,15 @@ def fetch_fit_metrics(client, activity_id):
     Note: aerobic/anaerobic TE and training load are NOT in FR55 FIT files (server-side only)."""
     try:
         import fitparse
-        fit_zip = client.download_activity(activity_id, dl_fmt=client.ActivityDownloadFormat.ORIGINAL)
+        fit_zip = _retry_after_rate_limit(
+            lambda: client.download_activity(
+                activity_id, dl_fmt=client.ActivityDownloadFormat.ORIGINAL
+            ),
+            activity_id,
+            "FIT metrics",
+        )
+        if fit_zip is None:
+            return {}
         with zipfile.ZipFile(io.BytesIO(fit_zip)) as z:
             fit_name = next((n for n in z.namelist() if n.endswith(".fit")), None)
             if not fit_name:
@@ -720,11 +767,103 @@ def compute_quality_session_breakdowns(quality_acts, laps_by_id, n=6):
     return blocks
 
 
-def _build_strava_gear_section():
-    """Build the Shoe Mileage markdown section (untracked — Strava API requires a paid subscription now)."""
+def fetch_garmin_shoe_mileage(client, activity_rows):
+    """Map Garmin gear to local running activities without per-activity calls."""
+    try:
+        profile = _retry_after_rate_limit(client.get_user_profile, "profile", "Garmin profile")
+        if not isinstance(profile, dict):
+            return None
+        profile_number = (
+            profile.get("userProfilePK")
+            or profile.get("userProfilePk")
+            or profile.get("userProfileNumber")
+        )
+        if not profile_number:
+            print("Warning: Garmin profile has no profile number; gear skipped", flush=True)
+            return None
+        gear_payload = _retry_after_rate_limit(
+            lambda: client.get_gear(profile_number), "profile", "Garmin gear"
+        )
+    except Exception as exc:
+        print(f"Warning: Garmin gear fetch failed: {exc}", flush=True)
+        return None
+    if gear_payload is None:
+        return None
+
+    if isinstance(gear_payload, list):
+        gear_items = gear_payload
+    elif isinstance(gear_payload, dict):
+        gear_items = next(
+            (
+                gear_payload.get(key)
+                for key in ("gear", "gearDTOs", "items")
+                if isinstance(gear_payload.get(key), list)
+            ),
+            [],
+        )
+    else:
+        gear_items = []
+
+    activities_by_id = {
+        str(row["activity_id"]): row
+        for row in activity_rows
+        if row.get("activity_id")
+    }
+    shoes = []
+    for index, gear in enumerate(gear_items):
+        if not isinstance(gear, dict):
+            continue
+        gear_uuid = gear.get("uuid") or gear.get("gearUUID") or gear.get("gearUuid")
+        if not gear_uuid:
+            continue
+        name = gear.get("gearName") or gear.get("displayName") or gear.get("name") or "Unnamed gear"
+        try:
+            linked = _retry_after_rate_limit(
+                lambda: client.get_gear_activities(gear_uuid, limit=1000),
+                gear_uuid,
+                "Garmin gear activities",
+            )
+        except Exception as exc:
+            print(f"Warning: Garmin gear activities failed for {name}: {exc}", flush=True)
+            continue
+        if not isinstance(linked, list):
+            continue
+        linked_ids = {
+            str(item.get("activityId") or item.get("activity_id"))
+            for item in linked
+            if isinstance(item, dict) and (item.get("activityId") or item.get("activity_id"))
+        }
+        matched = [activities_by_id[activity_id] for activity_id in linked_ids if activity_id in activities_by_id]
+        if matched:
+            shoes.append({
+                "name": str(name),
+                "activities": len(matched),
+                "distance_km": round(sum(float(row.get("distance_km") or 0) for row in matched), 1),
+            })
+        if index < len(gear_items) - 1:
+            time.sleep(GARMIN_ACTIVITY_REQUEST_INTERVAL_SECONDS)
+    return sorted(shoes, key=lambda shoe: shoe["distance_km"], reverse=True)
+
+
+def _build_garmin_gear_section(shoes):
+    """Build a gear summary, with a no-API Strava fallback note."""
+    if shoes is None:
+        source = "_Garmin gear could not be read during this sync._"
+    elif not shoes:
+        source = "_No Garmin gear is associated with the running activities in this local history._"
+    else:
+        rows = ["| Gear | Running activities | km in local history |", "|---|---:|---:|"]
+        rows.extend(
+            f"| {shoe['name']} | {shoe['activities']} | {shoe['distance_km']:.1f} |"
+            for shoe in shoes
+        )
+        source = "\n".join(rows)
     return (
         "## Shoe Mileage\n\n"
-        "_Not tracked — Strava's API now requires a paid developer subscription._"
+        f"{source}\n\n"
+        "> If shoe assignments live in Strava instead, use an authorized Strava API/MCP integration "
+        "when available. Otherwise, request the complete archive ZIP from the Strava website, wait "
+        "for its email download link, and attach the ZIP for an agent to match against Garmin activities."
     )
 
 
@@ -764,7 +903,7 @@ def fetch_garmin_race_predictions(client):
         return {}
 
 
-def generate_training_history(rows, laps_rows=None, race_predictions=None):
+def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes=None):
     """Regenerates training-history.md with fresh data from the CSV."""
     acts = _parse_activities(rows)
     if not acts:
@@ -922,9 +1061,6 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
             f"- **ACWR (7d ÷ chronic)**: **{acwr:.2f}** — {acwr_flag}"
         )
 
-    # Easy HR baseline pre/post gear
-    pre_stats, post_stats = compute_easy_hr_baseline(acts, QUALITY_KEYWORDS)
-
     def _fmt_stats(s):
         if not s:
             return "_no data_"
@@ -934,8 +1070,26 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
             f"(median {s['median_hr']}) · avg pace {pace}/km"
         )
 
+    if GEAR_CHANGE_DATE:
+        pre_stats, post_stats = compute_easy_hr_baseline(acts, QUALITY_KEYWORDS)
+        gear_baseline_section = f"""## Easy-Day HR Baseline (pre vs post gear change {GEAR_CHANGE_DATE.strftime('%Y-%m-%d')})
+
+- **Before gear change**: {_fmt_stats(pre_stats)}
+- **After gear change**: {_fmt_stats(post_stats)}
+
+> Use this split when interpreting HR improvements since a material gear change."""
+    else:
+        gear_baseline_section = """## Easy-Day HR Baseline
+
+_No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
+
     # Recent long runs
     lrs = identify_long_runs(acts, threshold_km=LONG_RUN_KM, n=10)
+    long_run_heading = (
+        f"## Recent Long Runs (≥ {LONG_RUN_KM:.0f} km, last 10)"
+        if LONG_RUN_KM
+        else "## Recent Long Runs"
+    )
     lr_md = []
     for a in lrs:
         lr_md.append(
@@ -944,7 +1098,10 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
             f"| {a['avg_hr'] or '—'} |"
         )
     if not lr_md:
-        lr_md.append(f"| _no runs ≥ {LONG_RUN_KM:.0f} km in record_ | | | | |")
+        if LONG_RUN_KM:
+            lr_md.append(f"| _no runs ≥ {LONG_RUN_KM:.0f} km in record_ | | | | |")
+        else:
+            lr_md.append("| _long-run threshold not configured_ | | | | |")
 
     # Recovery spacing
     gaps = compute_recovery_spacing(acts, QUALITY_KEYWORDS, n=10)
@@ -1200,12 +1357,7 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
 
 ---
 
-## Easy-Day HR Baseline (pre vs post gear change {GEAR_CHANGE_DATE.strftime('%Y-%m-%d')})
-
-- **Before gear change**: {_fmt_stats(pre_stats)}
-- **After gear change**: {_fmt_stats(post_stats)}
-
-> Use this split when interpreting HR improvements since mid-Mar 2026. A drop of ~5–10 bpm at similar pace is expected from shoes/insoles alone — only attribute the residual gain to fitness.
+{gear_baseline_section}
 
 ---
 
@@ -1243,7 +1395,7 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
 
 ---
 
-## Recent Long Runs (≥ {LONG_RUN_KM:.0f} km, last 10)
+{long_run_heading}
 
 | Date | Title | Distance | Pace | Avg HR |
 |------|-------|----------|------|--------|
@@ -1276,7 +1428,7 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
 {"---" + chr(10) + chr(10) + compliance_md + chr(10) + chr(10) if compliance_md else ""}
 ---
 
-{_build_strava_gear_section()}
+{_build_garmin_gear_section(shoes)}
 
 ---
 
@@ -1296,6 +1448,12 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None):
     with open(TRAINING_HISTORY_PATH, "w", encoding="utf-8") as f:
         f.write(content)
     print(f"training-history.md updated ({total_runs} activities, through {date_max.date()})", flush=True)
+
+
+def ensure_sync_output_directories():
+    """Create the parent directories for both local sync CSVs."""
+    for csv_path in (CSV_PATH, LAPS_CSV_PATH):
+        Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
 
 
 def main():
@@ -1452,7 +1610,7 @@ def main():
                 for key, val in metrics.items():
                     act_row[key] = val
                 if i < len(source) - 1:
-                    time.sleep(0.5)
+                    time.sleep(GARMIN_ACTIVITY_REQUEST_INTERVAL_SECONDS)
 
     # ── Fetch weather for activities missing it ─────────
     # Grouped by each activity's own start coordinates (falling back to
@@ -1462,26 +1620,38 @@ def main():
     weather_missing = [r for r in all_rows if r.get("weather_temp_c", "") in ("", None)]
     if weather_missing:
         location_groups = defaultdict(list)
+        weather_without_coordinates = []
         for row in weather_missing:
             lat = _float_or_none(row.get("weather_lat", ""), ndigits=WEATHER_COORD_DECIMALS)
             lon = _float_or_none(row.get("weather_lon", ""), ndigits=WEATHER_COORD_DECIMALS)
             if lat is None or lon is None:
                 lat, lon = WEATHER_LAT, WEATHER_LON
+            if lat is None or lon is None:
+                weather_without_coordinates.append(row)
+                continue
             location_groups[(lat, lon)].append(row)
 
-        print(
-            f"Fetching weather for {len(weather_missing)} activities "
-            f"across {len(location_groups)} location(s)...",
-            flush=True,
-        )
-        for (lat, lon), rows_at_location in location_groups.items():
-            dates_to_fetch = [r["date"][:10] for r in rows_at_location]
-            weather_data = fetch_weather_for_location(lat, lon, dates_to_fetch)
-            for row in rows_at_location:
-                d = row["date"][:10]
-                if d in weather_data:
-                    row["weather_temp_c"] = weather_data[d].get("temp_c", "")
-                    row["weather_humidity_pct"] = weather_data[d].get("humidity_pct", "")
+        if weather_without_coordinates:
+            print(
+                f"Warning: weather skipped for {len(weather_without_coordinates)} activities "
+                "without GPS coordinates or WEATHER_LAT/WEATHER_LON fallback",
+                flush=True,
+            )
+        if location_groups:
+            fetchable_count = sum(len(rows) for rows in location_groups.values())
+            print(
+                f"Fetching weather for {fetchable_count} activities "
+                f"across {len(location_groups)} location(s)...",
+                flush=True,
+            )
+            for (lat, lon), rows_at_location in location_groups.items():
+                dates_to_fetch = [r["date"][:10] for r in rows_at_location]
+                weather_data = fetch_weather_for_location(lat, lon, dates_to_fetch)
+                for row in rows_at_location:
+                    d = row["date"][:10]
+                    if d in weather_data:
+                        row["weather_temp_c"] = weather_data[d].get("temp_c", "")
+                        row["weather_humidity_pct"] = weather_data[d].get("humidity_pct", "")
 
     # Rewrite the full sorted CSV
     fieldnames = [
@@ -1493,6 +1663,7 @@ def main():
         "weather_temp_c", "weather_humidity_pct", "weather_lat", "weather_lon",
     ]
 
+    ensure_sync_output_directories()
     with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
@@ -1545,7 +1716,7 @@ def main():
                 laps = fetch_activity_laps(client, str(act_row["activity_id"]))
                 new_lap_rows.extend(laps)
                 if i < len(to_fetch) - 1:
-                    time.sleep(0.5)
+                    time.sleep(GARMIN_ACTIVITY_REQUEST_INTERVAL_SECONDS)
             if new_lap_rows:
                 laps_rows = laps_rows + new_lap_rows
                 lap_fieldnames = ["activity_id", "lap_index", "distance_km",
@@ -1559,9 +1730,10 @@ def main():
 
     # ── Garmin race predictions ────────────────────────────
     race_predictions = fetch_garmin_race_predictions(client)
+    shoes = fetch_garmin_shoe_mileage(client, all_rows)
 
     # Regenerate training-history.md with fresh data
-    generate_training_history(all_rows, laps_rows, race_predictions)
+    generate_training_history(all_rows, laps_rows, race_predictions, shoes)
 
     if ACTIVE_PLAN.is_active:
         try:
