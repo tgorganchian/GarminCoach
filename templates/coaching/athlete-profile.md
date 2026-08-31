@@ -2,9 +2,14 @@
 
 ## Coaching context
 
-- Primary goal:
+- Primary goal (one of: dated race / time target at a distance / general goal
+  such as aerobic base, holding fitness, or return from a layoff):
+- Goal type and target date, if any:
 - Current constraints, including injury or pain:
-- Day availability:
+- Running days available each week:
+- Strength-training day(s) and recovery impact:
+- Preferred weekly structure or session types:
+- Intensity target or preference, including the athlete's low-aerobic zone mapping (for example, roughly 80% of running time or distance at low intensity, including warm-ups and cooldowns):
 
 ## Heart-rate and pace context
 

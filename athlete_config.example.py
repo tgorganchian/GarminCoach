@@ -6,6 +6,12 @@ coaching/training-plan.md, never in this file.
 """
 
 HR_ZONES = []
+# Which of those zones count as easy and as hard, as 1-based numbers into
+# HR_ZONES. Leave as None to split the list into thirds, which reads a
+# five-zone system as easy 1-2 / moderate 3 / hard 4-5, and a three-zone
+# LT1-LT2 system as one zone per band.
+EASY_ZONE_MAX = None
+HARD_ZONE_MIN = None
 # Optional manual date for a pre/post-gear HR comparison. Garmin gear tracking
 # works without this setting.
 GEAR_CHANGE_DATE = None

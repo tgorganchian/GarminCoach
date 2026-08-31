@@ -7,7 +7,8 @@ block is the confirmed machine-readable source.
 ## Intent and guardrails
 
 - Four running days per week: one quality session, two easy/recovery sessions,
-  and one long run.
+  and one long run. Warm-ups, cooldowns, and recovery running count toward the
+  approximate 80% low-aerobic target.
 - Pace targets are controlled ranges. Pain, an athlete limit, or a material
   recovery signal requires a new proposal rather than silent changes.
 - The renderer previews a 14-day-or-longer horizon before any remote write.

@@ -20,5 +20,5 @@
 /.venv/
 /.venv-whisper/
 
-# Agent working notes are local, not product documentation.
-/docs/superpowers/
+# Agent working notes and research are local, not product documentation.
+/docs/

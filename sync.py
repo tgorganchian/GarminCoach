@@ -63,6 +63,8 @@ LAPS_CSV_PATH = str(PATHS.laps_csv)
 # ─── Athlete config (athlete_config.py, local, gitignored) ──────────────
 GEAR_CHANGES_SECTION = getattr(cfg, "GEAR_CHANGES_SECTION", "")
 HR_ZONES = getattr(cfg, "HR_ZONES", [])
+EASY_ZONE_MAX = getattr(cfg, "EASY_ZONE_MAX", None)
+HARD_ZONE_MIN = getattr(cfg, "HARD_ZONE_MIN", None)
 GEAR_CHANGE_DATE = getattr(cfg, "GEAR_CHANGE_DATE", None)
 RACE_CALENDAR = getattr(cfg, "RACE_CALENDAR", [])
 LONG_RUN_KM = getattr(cfg, "LONG_RUN_KM", 0)
@@ -208,33 +210,114 @@ def compute_race_countdown(race_calendar, today):
     return rows
 
 
-def compute_weekly_zone_pct(acts, n_weeks=8):
-    weekly_zones = defaultdict(lambda: defaultdict(float))
-    for a in acts:
-        if not a["avg_hr"]:
+BANDS = ("easy", "moderate", "hard")
+
+
+def band_boundaries():
+    """Index cuts splitting the ordered HR_ZONES into easy, moderate, and hard.
+
+    Zone systems differ: three physiological zones around LT1/LT2, Garmin's five,
+    or an athlete's own split. Default to thirds of the list, which bands zones
+    1-2 easy and 4-5 hard in a five-zone system and gives one zone per band in a
+    three-zone one. EASY_ZONE_MAX and HARD_ZONE_MIN override that with 1-based
+    zone numbers for any system where thirds are the wrong reading.
+    """
+    count = len(HR_ZONES)
+    if count == 0:
+        return 0, 0
+    third = -(-count // 3)
+    easy_end, hard_start = third, count - third
+    if EASY_ZONE_MAX:
+        easy_end = min(max(int(EASY_ZONE_MAX), 1), count)
+    if HARD_ZONE_MIN:
+        hard_start = min(max(int(HARD_ZONE_MIN) - 1, 0), count)
+    return easy_end, max(hard_start, easy_end)
+
+
+def describe_intensity_bands():
+    """Which configured zones fall in each band, for disclosure in the history."""
+    easy_end, hard_start = band_boundaries()
+    grouped = {band: [] for band in BANDS}
+    for index, zone in enumerate(HR_ZONES):
+        band = "easy" if index < easy_end else ("hard" if index >= hard_start else "moderate")
+        grouped[band].append(zone[0])
+    return " · ".join(
+        f"{band.capitalize()} = {', '.join(grouped[band])}" for band in BANDS if grouped[band]
+    )
+
+
+def _intensity_band(hr, bounds):
+    """Map a heart rate to its band, or None when it falls outside every zone."""
+    easy_end, hard_start = bounds
+    for index, zone in enumerate(HR_ZONES):
+        if zone[1] <= hr < zone[2]:
+            if index < easy_end:
+                return "easy"
+            return "hard" if index >= hard_start else "moderate"
+    return None
+
+
+def _lap_band_minutes(laps, bounds):
+    """Minutes per band from one activity's laps, or None when no lap is usable."""
+    minutes = dict.fromkeys(BANDS, 0.0)
+    usable = False
+    for lap in laps:
+        try:
+            hr = _int_or_none(lap.get("avg_hr"))
+            duration = float(lap.get("duration_min") or 0)
+        except (TypeError, ValueError):
             continue
-        w = _week_start(a["date"])
-        for name, lo, hi in HR_ZONES:
-            if lo <= a["avg_hr"] < hi:
-                weekly_zones[w][name] += a["distance_km"]  # km-weighted, not run count
-                break
-    if not weekly_zones:
-        return []
-    recent = sorted(weekly_zones.keys())[-n_weeks:]
+        if hr is None or duration <= 0:
+            continue
+        band = _intensity_band(hr, bounds)
+        if band is None:
+            continue
+        minutes[band] += duration
+        usable = True
+    return minutes if usable else None
+
+
+def compute_weekly_zone_pct(acts, laps_by_id=None, n_weeks=8):
+    """Weekly intensity split, time-weighted and lap-level wherever laps exist.
+
+    Classifying a whole activity by its average HR counts an interval session
+    entirely as Z3/Z4 and hides the easy running inside its warm-up, recoveries,
+    and cooldown. Laps are used when present; an activity without them falls back
+    to its average HR applied over its whole duration.
+    """
+    bounds = band_boundaries()
+    weekly = defaultdict(lambda: {**dict.fromkeys(BANDS, 0.0), "km": 0.0, "lap_min": 0.0})
+    for a in acts:
+        aid = str(a.get("activity_id") or "").strip()
+        laps = laps_by_id.get(aid) if laps_by_id and aid else None
+        minutes = _lap_band_minutes(laps, bounds) if laps else None
+        from_laps = minutes is not None
+        if minutes is None:
+            band = _intensity_band(a["avg_hr"], bounds) if a["avg_hr"] else None
+            if band is None or a["duration_min"] <= 0:
+                continue
+            minutes = dict.fromkeys(BANDS, 0.0)
+            minutes[band] = a["duration_min"]
+        week = weekly[_week_start(a["date"])]
+        for band in BANDS:
+            week[band] += minutes[band]
+        week["km"] += a["distance_km"]
+        if from_laps:
+            week["lap_min"] += sum(minutes.values())
     rows = []
-    for w in recent:
-        total = sum(weekly_zones[w].values())
+    for w in sorted(weekly.keys())[-n_weeks:]:
+        week = weekly[w]
+        total = sum(week[band] for band in BANDS)
         if total == 0:
             continue
-        z12 = weekly_zones[w]["Z1 Easy"] + weekly_zones[w]["Z2 Aerobic"]
-        z3 = weekly_zones[w]["Z3 Tempo"]
-        z45 = weekly_zones[w]["Z4 Hard"] + weekly_zones[w]["Z5 Max"]
         rows.append({
             "week_start": w,
-            "total_km": round(total, 1),
-            "z12_pct": int(z12 / total * 100),
-            "z3_pct": int(z3 / total * 100),
-            "z45_pct": int(z45 / total * 100),
+            "total_km": round(week["km"], 1),
+            "total_min": round(total),
+            "easy_pct": int(week["easy"] / total * 100),
+            "moderate_pct": int(week["moderate"] / total * 100),
+            "hard_pct": int(week["hard"] / total * 100),
+            "lap_coverage_pct": int(week["lap_min"] / total * 100),
         })
     return rows
 
@@ -1028,18 +1111,20 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes
             )
 
     # Weekly zone %
-    wzp = compute_weekly_zone_pct(acts, n_weeks=8)
+    wzp = compute_weekly_zone_pct(acts, laps_by_id, n_weeks=8)
+    band_description = describe_intensity_bands() or "_no zones configured_"
     wzp_md = []
     for row in wzp:
         end = row["week_start"] + timedelta(days=6)
         label = f"{row['week_start'].strftime('%b %d')}–{end.strftime('%b %d')}"
         flag = ""
-        if row["z12_pct"] < 60:
+        if row["easy_pct"] < 60:
             flag = " ⚠️ too much intensity"
-        elif row["z12_pct"] >= 80:
+        elif row["easy_pct"] >= 80:
             flag = " ✅ 80/20 on track"
         wzp_md.append(
-            f"| {label} | {row['total_km']:.1f} | {row['z12_pct']}% | {row['z3_pct']}% | {row['z45_pct']}% |{flag}"
+            f"| {label} | {row['total_km']:.1f} | {row['total_min']} | {row['easy_pct']}% | "
+            f"{row['moderate_pct']}% | {row['hard_pct']}% | {row['lap_coverage_pct']}% |{flag}"
         )
 
     # ACWR
@@ -1309,13 +1394,15 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
 
 ---
 
-## Weekly HR-Zone Split (last 8 weeks, km-weighted)
+## Weekly Intensity Split (last 8 weeks, time-weighted)
 
-| Week | km | Z1–Z2 % | Z3 % | Z4–Z5 % | Flag |
-|------|----|---------|------|---------|------|
-{chr(10).join(wzp_md) if wzp_md else '| _no HR data_ | | | | | |'}
+| Week | km | min | Easy % | Moderate % | Hard % | From laps | Flag |
+|------|----|-----|--------|------------|--------|-----------|------|
+{chr(10).join(wzp_md) if wzp_md else '| _no HR data_ | | | | | | | |'}
 
-> Target for an advanced runner building base: ≥ 80% in Z1–Z2. Isolated hard weeks (race weeks, peak) can dip lower — consistent sub-60% is the injury/stagnation red zone.
+> Bands for this athlete's configured zones: {band_description}
+>
+> Percentages are minutes per intensity band, split lap by lap where lap data exists, so a warm-up, the recoveries between reps, and a cooldown count as easy running inside a quality session. **From laps** is the share of that week's minutes measured this way; the remainder is an activity classified whole by its average HR, which overstates its hardest band. Target for base building: ≥ 80% easy. Isolated hard weeks (race weeks, peak) can dip lower — consistent sub-60% is the injury/stagnation red zone.
 
 ---
 
@@ -1333,7 +1420,7 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
 |------|-----|------------|---|
 {chr(10).join(zone_rows)}
 
-> ⚠️ **Coaching note**: The ideal distribution for an 80/20 aerobic base is ~80% in Z1–Z2. Z3 dominance suggests easy days may be run too hard.
+> ⚠️ **Coaching note**: This table classifies each run whole by its average HR, so it is a coarser view than the Weekly Intensity Split above. An 80/20 aerobic base wants ~80% in the easy band; a pile-up in the moderate band suggests easy days are being run too hard.
 
 ---
 
@@ -1343,7 +1430,7 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
 |------|------|----------|---------|---------|
 {chr(10).join(pz_md)}
 
-> If Z1–Z2 avg pace is faster than the athlete's listed easy-pace band, the discipline problem is pace-driven, not just HR-driven.
+> If avg pace in the easy-band zones ({band_description}) is faster than the athlete's listed easy-pace band, the discipline problem is pace-driven, not just HR-driven.
 
 ---
 

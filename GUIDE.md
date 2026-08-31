@@ -47,7 +47,7 @@ echo credentials or tokens.
 | --- | --- | --- |
 | Garmin credentials and local paths | `.env` | Sync, not guided setup |
 | Zones, records, calendar, classifiers, and optional weather fallback | `athlete_config.py` | Data-driven sync |
-| Profile and coaching references | `coaching/` | Normal coaching |
+| Profile, weekly availability, and coaching references | `coaching/` | Normal coaching |
 | Journal root | `coaching/journal/` by default | Normal coaching |
 | Active training plan | `coaching/training-plan.md` | Only plan/render operations |
 | Obsidian journal root | `JOURNAL_PATH` in `.env` | Optional |
@@ -152,6 +152,39 @@ resolved with the athlete.
 `coaching/training-plan.md` combines human-readable rationale with exactly one
 JSON code block tagged `plan-data`. It is the single source for plan compliance
 and Garmin workout definitions.
+
+### Planning context and intensity
+
+During initial setup, record the athlete's goal, running availability,
+strength-day timing, and constraints in `coaching/athlete-profile.md`. These are
+inputs to coaching judgment, not a fixed weekly recipe. No plan is proposed
+without a stated goal — a dated race, a time target at a distance, or a general
+goal such as building aerobic base — because the goal is what makes a given
+quality session justifiable. The agent should state the main stressors, recovery
+spacing, planned volume, and intended intensity mix when it proposes or changes
+a plan.
+
+The athlete's own history sets the level of a proposal: planned weekly volume,
+longest run, and quality frequency are compared against the recent medians in
+`coaching/training-history.md`, and anything above them is named as a deliberate
+progression. That comparison replaces any template keyed to the number of
+running days per week.
+
+Aim for roughly 80% of planned running time at low aerobic intensity, counting
+warm-ups, cooldowns, and recovery running. Compute it from the `plan-data` steps
+rather than by labelling whole sessions: a set of intervals wrapped in a warm-up
+and cooldown is mostly easy running. Treat the 80% as a block-level guardrail
+that individual weeks may deviate from with a stated reason, then contrast it
+with the synced Weekly Intensity Split and its `From laps` coverage rather than
+assuming planned pace equals actual physiological intensity.
+
+State how the low-aerobic band maps to the athlete's zones; the 80/20
+literature's threshold-based zones are not automatically Garmin's five.
+`HR_ZONES` may hold any number of zones — three physiological ones around
+LT1/LT2, Garmin's five, or the athlete's own — split into easy, moderate, and
+hard bands by thirds of the list unless `EASY_ZONE_MAX` and `HARD_ZONE_MIN` say
+otherwise. The generated history names the resulting bands, so read them there
+instead of inferring a band from a zone's number or name.
 
 ```plan-data
 {
