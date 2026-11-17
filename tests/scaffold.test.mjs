@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -98,7 +98,10 @@ test("packed artifact is private-safe and its installed scaffold works", () => {
       encoding: "utf8",
       shell: process.platform === "win32",
     });
-    execFileSync(process.execPath, [join(installed, "node_modules", "create-garmin-coach", "bin", "create-garmin-coach.mjs"), target], {
+    // npx runs the bin through a symlink on macOS/Linux; a directory link reproduces that on every OS.
+    const linkedBin = join(root, "linked-bin");
+    symlinkSync(join(installed, "node_modules", "create-garmin-coach", "bin"), linkedBin, "junction");
+    execFileSync(process.execPath, [join(linkedBin, "create-garmin-coach.mjs"), target], {
       cwd: installed,
       encoding: "utf8",
     });
