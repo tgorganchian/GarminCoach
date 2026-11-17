@@ -1,9 +1,9 @@
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import sync
+from garmin_coach.athlete import AthleteConfig
+from garmin_coach.plan import no_active_plan
 
 
 class SyncOptionalDataTests(unittest.TestCase):
@@ -15,8 +15,7 @@ class SyncOptionalDataTests(unittest.TestCase):
             "avg_pace": "6:30",
         }
 
-        with patch.object(sync, "GEAR_CHANGE_DATE", None):
-            self.assertEqual((None, None), sync.compute_easy_hr_baseline([activity], []))
+        self.assertEqual((None, None), sync.compute_easy_hr_baseline([activity], [], None))
 
     def test_weather_skips_activities_without_coordinates(self):
         with patch("sync.requests.get") as get:
@@ -63,11 +62,7 @@ class SyncOptionalDataTests(unittest.TestCase):
         }
         laps = {"100": [{"distance_km": 1, "avg_pace_min_km": "4:30"}]}
 
-        with (
-            patch.object(sync, "QUALITY_LAP_PACE_THRESHOLD", None),
-            patch.object(sync, "MIN_QUALITY_LAP_KM", None),
-        ):
-            self.assertFalse(sync._has_quality_lap(activity, laps))
+        self.assertFalse(sync._has_quality_lap(activity, laps, AthleteConfig()))
         self.assertEqual([], sync.identify_long_runs([activity], threshold_km=None))
 
     def test_history_generates_with_the_public_optional_defaults(self):
@@ -81,32 +76,10 @@ class SyncOptionalDataTests(unittest.TestCase):
             "avg_heart_rate": "140",
         }
 
-        with TemporaryDirectory() as directory:
-            history = Path(directory) / "training-history.md"
-            with (
-                patch.object(sync, "TRAINING_HISTORY_PATH", str(history)),
-                patch.object(sync, "GEAR_CHANGE_DATE", None),
-                patch.object(sync, "LONG_RUN_KM", None),
-                patch.object(sync, "QUALITY_LAP_PACE_THRESHOLD", None),
-                patch.object(sync, "MIN_QUALITY_LAP_KM", None),
-            ):
-                sync.generate_training_history([row])
+        content = sync.render_training_history(
+            [row], [], config=AthleteConfig(), plan=no_active_plan(),
+            now=sync.datetime(2026, 1, 2), laps_csv_path="data/activity_laps.csv",
+        )
 
-            self.assertTrue(history.exists())
-            content = history.read_text(encoding="utf-8")
-            self.assertIn("No gear-change date configured", content)
-            self.assertIn("long-run threshold not configured", content)
-
-    def test_sync_creates_configured_csv_directories(self):
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            csv_path = root / "exports" / "activities.csv"
-            laps_path = root / "exports" / "activity_laps.csv"
-            with (
-                patch.object(sync, "CSV_PATH", str(csv_path)),
-                patch.object(sync, "LAPS_CSV_PATH", str(laps_path)),
-            ):
-                sync.ensure_sync_output_directories()
-
-            self.assertTrue(csv_path.parent.is_dir())
-            self.assertTrue(laps_path.parent.is_dir())
+        self.assertIn("No gear-change date configured", content)
+        self.assertIn("long-run threshold not configured", content)

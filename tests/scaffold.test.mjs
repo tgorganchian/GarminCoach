@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -37,6 +37,20 @@ test("scaffold creates generic local coaching state", () => {
     assert.ok(readdirSync(join(target, "examples", "coaching", "journal")).includes("2026-W15.md"));
     assert.ok(!readdirSync(target).includes("docs"));
     assert.match(execFileSync("python", ["release_audit.py"], { cwd: target, encoding: "utf8" }), /passed/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace points any agent at the coaching router", () => {
+  const root = mkdtempSync(join(tmpdir(), "garmin-coach-test-"));
+  const target = join(root, "workspace");
+  try {
+    createProject(target);
+    const agents = readFileSync(join(target, "AGENTS.md"), "utf8");
+    const router = agents.match(/`(skills\/running-coach\/SKILL\.md)`/)?.[1];
+    assert.ok(router && existsSync(join(target, router)), "AGENTS.md must name the router that ships in the workspace");
+    assert.match(readFileSync(join(target, "CLAUDE.md"), "utf8"), /^@AGENTS\.md$/m);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

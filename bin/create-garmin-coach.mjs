@@ -49,6 +49,9 @@ export function createProject(destination, root = sourceRoot) {
   copyFile(root, target, ".env.example", ".env");
   copyFile(root, target, "athlete_config.example.py", "athlete_config.py");
   copyFile(root, target, "templates/project.gitignore", ".gitignore");
+  // Agents read these on opening the workspace, so the coaching router needs no install step.
+  copyFile(root, target, "templates/workspace-agents.md", "AGENTS.md");
+  copyFile(root, target, "templates/workspace-claude.md", "CLAUDE.md");
   for (const name of ["athlete-profile.md", "coach-log.md", "training-plan.md"]) {
     copyFile(root, target, `templates/coaching/${name}`, `coaching/${name}`);
   }

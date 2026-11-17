@@ -41,9 +41,8 @@ proposal:
   is tolerated load; a single large week is not.
 - Runs per week, and how stable that frequency is.
 - Longest run in the last 8 and 12 weeks.
-- The observed intensity split from the Weekly Intensity Split table, together
-  with its `From laps` coverage — a low coverage week is an estimate that
-  overstates its hardest band.
+- The observed intensity split from the Weekly Intensity Split table, read as
+  `running-intensity` describes.
 - Which quality sessions actually appear, how often, and how the athlete
   responded: pace and HR across repeats, `feeling`, `perceived_effort`.
 - Interruptions: layoffs, missed weeks, illness, and pain in the journal.
@@ -70,33 +69,16 @@ running days does not prescribe a fixed arrangement.
 
 ## Count intensity by step, not by session
 
-Compute the planned split from the `plan-data` steps rather than estimating it.
-`warmup`, `cooldown`, and `recovery` steps are easy running; an `interval`
-counts in the band of its target. No session is wholly hard: 4x800m between a
-1600m warm-up and a 1600m cooldown is mostly easy running, and counting it as a
-hard session inflates the intensity of the whole week. A long run holding a
-sustained block counts that block in its band and the rest as easy, and must be
-declared as a key stressor and offset elsewhere in the week.
-
-Show planned minutes per band for each week and for the block, next to the
-observed split from the history. Aim for roughly 80% low-aerobic across the
-block. Individual weeks may sit below that — a build week, a race week, a
-sharpening week — as long as the block holds and the week states its reason. A
-block that misses the target is a design error, not a variation.
-
-State the zone mapping you used. The athlete's system is whatever they
-configured — three physiological zones around LT1/LT2, Garmin's five, or their
-own split — and `coaching/training-history.md` names which of their zones fall
-in the easy, moderate, and hard bands. Read that line instead of assuming five
-zones, and do not equate the 80/20 literature's threshold-based zones with
-Garmin's automatically.
+Apply `running-intensity` to the proposal: count the planned split from the
+`plan-data` steps, hold its 80% low-aerobic target across the block, and state
+the zone mapping you used. Show planned minutes per band for each week and for
+the block, next to the observed split from the history.
 
 ## Choose the week's stressors deliberately
 
-Interval/tempo work, a demanding long run, racing, hill work, and heavy
-lower-body strength all consume recovery budget; assess their combined load
-rather than counting only sessions named "quality". Preserve enough easy
-aerobic running and recovery spacing for the athlete's current base. Avoid
+Weigh the week's combined stress budget as `running-intensity` defines it.
+Preserve enough easy aerobic running and recovery spacing for the athlete's
+current base. Avoid
 turning every run into moderate work or adding intensity merely to fill an
 available day. Select the minimum quality that serves the goal, and justify any
 additional demanding stimulus with recent evidence.

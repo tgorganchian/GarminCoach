@@ -9,7 +9,7 @@
 - Running days available each week:
 - Strength-training day(s) and recovery impact:
 - Preferred weekly structure or session types:
-- Intensity target or preference, including the athlete's low-aerobic zone mapping (for example, roughly 80% of running time or distance at low intensity, including warm-ups and cooldowns):
+- Intensity target or preference, including the athlete's low-aerobic zone mapping (for example, roughly 80% of running time at low intensity, including warm-ups and cooldowns):
 
 ## Heart-rate and pace context
 

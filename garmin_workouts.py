@@ -6,12 +6,14 @@ import argparse
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from garmin_coach.paths import load_project_env, project_paths
+from garmin_coach.manifest import load_manifest, write_manifest
+from garmin_coach.paths import project_paths
 from garmin_coach.plan import PlanSession, PlanValidationError, Step, TrainingPlan, parse_training_plan
 
 
@@ -124,43 +126,20 @@ def reconcile(plan: TrainingPlan, manifest: dict[str, Any], start: date, days: i
         existing = entries.get(session.id)
         if not existing:
             actions.append(Action("create", session.id, session.date.isoformat(), payload["workoutName"], digest))
-        elif existing["fingerprint"] != digest:
-            actions.append(Action("update", session.id, session.date.isoformat(), payload["workoutName"], digest, existing["remote_workout_id"], existing.get("scheduled_workout_id"), existing["name"], existing["date"]))
+            continue
+        if existing["fingerprint"] != digest:
+            kind = "update"
         elif existing["date"] != session.date.isoformat():
-            actions.append(Action("reschedule", session.id, session.date.isoformat(), payload["workoutName"], digest, existing["remote_workout_id"], existing.get("scheduled_workout_id"), existing["name"], existing["date"]))
+            # Also where an interrupted apply resumes: an unscheduled entry has no date.
+            kind = "reschedule"
         else:
-            actions.append(Action("unchanged", session.id, session.date.isoformat(), payload["workoutName"], digest, existing["remote_workout_id"], existing.get("scheduled_workout_id"), existing["name"], existing["date"]))
+            kind = "unchanged"
+        actions.append(Action(kind, session.id, session.date.isoformat(), payload["workoutName"], digest, existing["remote_workout_id"], existing.get("scheduled_workout_id"), existing["name"], existing["date"]))
     end = date.fromordinal(start.toordinal() + days - 1).isoformat()
     for session_id, entry in entries.items():
-        if session_id not in expected_ids and start.isoformat() <= entry["date"] <= end:
+        if session_id not in expected_ids and entry["date"] and start.isoformat() <= entry["date"] <= end:
             actions.append(Action("unschedule", session_id, entry["date"], entry["name"], entry["fingerprint"], entry["remote_workout_id"], entry.get("scheduled_workout_id"), entry["name"], entry["date"]))
     return sorted(actions, key=lambda action: (action.date, action.session_id, action.kind))
-
-
-def load_manifest(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {"version": 1, "entries": {}}
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if value.get("version") != 1 or not isinstance(value.get("entries"), dict):
-        raise ValueError(f"{path}: invalid Garmin workout manifest")
-    return value
-
-
-def managed_coverage_days(manifest: dict[str, Any], start: date) -> int:
-    dates = []
-    for entry in manifest.get("entries", {}).values():
-        try:
-            scheduled = date.fromisoformat(entry["date"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if scheduled >= start:
-            dates.append(scheduled)
-    return max((scheduled - start).days + 1 for scheduled in dates) if dates else 0
-
-
-def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def preview_document(actions: list[Action], start: date, days: int) -> dict[str, Any]:
@@ -175,6 +154,8 @@ def save_preview(path: Path, preview: dict[str, Any]) -> None:
 
 
 class GarminGateway:
+    """Production adapter over garminconnect: one remote operation per method."""
+
     def __init__(self, token_dir: Path):
         from garminconnect import Garmin
 
@@ -192,27 +173,17 @@ class GarminGateway:
             if str(remote_id) != str(action.remote_workout_id) or not isinstance(scheduled_date, str) or not scheduled_date.startswith(action.expected_scheduled_date):
                 raise RuntimeError(f"Remote workout schedule changed for {action.session_id}; refusing to modify it.")
 
-    def apply(self, action: Action, payload: dict[str, Any] | None) -> tuple[int | None, int | None]:
-        if action.kind == "create":
-            created = self.client.upload_workout(payload)
-            workout_id = int(created["workoutId"])
-            scheduled = self.client.schedule_workout(workout_id, action.date)
-            return workout_id, _scheduled_id(scheduled)
-        self.verify_owned(action)
-        if action.kind == "update":
-            self.client.update_workout(action.remote_workout_id, payload)
-        elif action.kind == "reschedule":
-            if action.scheduled_workout_id is None:
-                raise RuntimeError(f"{action.session_id} has no known scheduled-workout ID; refusing to reschedule.")
-            self.client.unschedule_workout(action.scheduled_workout_id)
-            scheduled = self.client.schedule_workout(action.remote_workout_id, action.date)
-            return action.remote_workout_id, _scheduled_id(scheduled)
-        elif action.kind == "unschedule":
-            if action.scheduled_workout_id is None:
-                raise RuntimeError(f"{action.session_id} has no known scheduled-workout ID; refusing to unschedule.")
-            self.client.unschedule_workout(action.scheduled_workout_id)
-            return action.remote_workout_id, None
-        return action.remote_workout_id, action.scheduled_workout_id
+    def create(self, payload: dict[str, Any]) -> int:
+        return int(self.client.upload_workout(payload)["workoutId"])
+
+    def schedule(self, workout_id: int, on_date: str) -> int | None:
+        return _scheduled_id(self.client.schedule_workout(workout_id, on_date))
+
+    def update(self, workout_id: int, payload: dict[str, Any]) -> None:
+        self.client.update_workout(workout_id, payload)
+
+    def unschedule(self, scheduled_workout_id: int) -> None:
+        self.client.unschedule_workout(scheduled_workout_id)
 
 
 def _scheduled_id(value: Any) -> int | None:
@@ -241,27 +212,43 @@ def _nested_value(value: Any, names: tuple[str, ...]) -> Any:
     return None
 
 
-def execute_apply(plan: TrainingPlan, actions: list[Action], manifest: dict[str, Any], gateway: GarminGateway) -> dict[str, Any]:
+def execute_apply(plan: TrainingPlan, actions: list[Action], manifest: dict[str, Any], gateway: Any, save: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    """Apply confirmed actions, saving the manifest after every remote write.
+
+    A failure part-way leaves the manifest describing what Garmin holds, so no created
+    workout goes unowned and the next preview resumes where this one stopped.
+    """
     entries = manifest["entries"]
     sessions = {session.id: session for session in plan.sessions}
+
+    def record(session_id: str, **fields: Any) -> None:
+        entries[session_id] = {**entries.get(session_id, {}), **fields}
+        save(manifest)
+
     for action in actions:
         if action.kind == "unchanged":
             continue
-        payload = render_session(sessions[action.session_id]) if action.kind in {"create", "update"} else None
-        remote_id, scheduled_id = gateway.apply(action, payload)
-        if action.kind == "update" and entries[action.session_id]["date"] != action.date:
-            reschedule = Action("reschedule", action.session_id, action.date, action.name, action.fingerprint, remote_id, scheduled_id or action.scheduled_workout_id, action.name, entries[action.session_id]["date"])
-            remote_id, scheduled_id = gateway.apply(reschedule, None)
-        if action.kind == "unschedule":
-            entries.pop(action.session_id, None)
-        else:
-            entries[action.session_id] = {
-                "remote_workout_id": remote_id,
-                "scheduled_workout_id": scheduled_id if scheduled_id is not None else action.scheduled_workout_id,
-                "date": action.date,
-                "name": action.name,
-                "fingerprint": action.fingerprint,
-            }
+        if action.kind == "create":
+            workout_id = gateway.create(render_session(sessions[action.session_id]))
+            record(action.session_id, remote_workout_id=workout_id, scheduled_workout_id=None, date=None, name=action.name, fingerprint=action.fingerprint)
+            record(action.session_id, scheduled_workout_id=gateway.schedule(workout_id, action.date), date=action.date)
+            continue
+        gateway.verify_owned(action)
+        if action.kind == "update":
+            gateway.update(action.remote_workout_id, render_session(sessions[action.session_id]))
+            record(action.session_id, name=action.name, fingerprint=action.fingerprint)
+        if action.kind != "unschedule" and action.expected_scheduled_date == action.date:
+            continue
+        if action.expected_scheduled_date is not None:
+            if action.scheduled_workout_id is None:
+                raise RuntimeError(f"{action.session_id} has no known scheduled-workout ID; refusing to change its schedule.")
+            gateway.unschedule(action.scheduled_workout_id)
+            if action.kind == "unschedule":
+                entries.pop(action.session_id)
+                save(manifest)
+                continue
+            record(action.session_id, scheduled_workout_id=None, date=None)
+        record(action.session_id, scheduled_workout_id=gateway.schedule(action.remote_workout_id, action.date), date=action.date)
     return manifest
 
 
@@ -273,7 +260,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.days < 14:
         parser.error("--days must be at least 14")
-    paths = load_project_env(project_paths())
+    paths = project_paths()
     try:
         plan = parse_training_plan(paths.training_plan)
     except PlanValidationError as exc:
@@ -293,8 +280,7 @@ def main() -> int:
     saved = json.loads(paths.workout_preview.read_text(encoding="utf-8"))
     if args.apply != saved.get("id") or preview != saved:
         raise SystemExit("Preview changed or does not match --apply. Review a new preview before remote writes.")
-    updated = execute_apply(plan, actions, manifest, GarminGateway(paths.token_dir))
-    write_manifest(paths.workout_manifest, updated)
+    execute_apply(plan, actions, manifest, GarminGateway(paths.token_dir), save=lambda current: write_manifest(paths.workout_manifest, current))
     print("Applied the confirmed manifest-owned workout preview.")
     return 0
 

@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 
 @dataclass(frozen=True)
 class ProjectPaths:
     root: Path
+    # .env values under the real environment, read once so every command resolves the same paths.
+    # Kept out of repr so credentials never reach a log or traceback.
+    settings: Mapping[str, str] = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def env_file(self) -> Path:
@@ -43,7 +47,7 @@ class ProjectPaths:
 
     @property
     def journal(self) -> Path:
-        return _configured_path("JOURNAL_PATH", self.coaching / "journal", self.root)
+        return self._configured("JOURNAL_PATH", self.coaching / "journal")
 
     @property
     def data(self) -> Path:
@@ -51,7 +55,7 @@ class ProjectPaths:
 
     @property
     def activities_csv(self) -> Path:
-        return _configured_path("CSV_PATH", self.data / "activities.csv", self.root)
+        return self._configured("CSV_PATH", self.data / "activities.csv")
 
     @property
     def laps_csv(self) -> Path:
@@ -59,7 +63,7 @@ class ProjectPaths:
 
     @property
     def token_dir(self) -> Path:
-        return _configured_path("GARMIN_TOKEN_DIR", self.root / "garmin_tokens", self.root)
+        return self._configured("GARMIN_TOKEN_DIR", self.root / "garmin_tokens")
 
     @property
     def workout_manifest(self) -> Path:
@@ -73,21 +77,20 @@ class ProjectPaths:
     def feedback(self) -> Path:
         return self.root / "feedback"
 
-
-def _configured_path(name: str, default: Path, root: Path) -> Path:
-    value = os.getenv(name, "").strip()
-    if not value:
-        return default
-    path = Path(value)
-    return path if path.is_absolute() else root / path
+    def _configured(self, name: str, default: Path) -> Path:
+        value = (self.settings.get(name) or "").strip()
+        if not value:
+            return default
+        path = Path(value)
+        return path if path.is_absolute() else self.root / path
 
 
 def project_paths(root: Path | None = None) -> ProjectPaths:
-    workspace_root = Path(__file__).resolve().parents[1]
-    return ProjectPaths((root or workspace_root).resolve())
+    workspace_root = (root or Path(__file__).resolve().parents[1]).resolve()
+    return ProjectPaths(workspace_root, _settings(workspace_root / ".env"))
 
 
-def load_project_env(paths: ProjectPaths | None = None) -> ProjectPaths:
-    paths = paths or project_paths()
-    load_dotenv(paths.env_file)
-    return paths
+def _settings(env_file: Path) -> dict[str, str]:
+    values = dotenv_values(env_file) if env_file.exists() else {}
+    # The real environment wins, as with python-dotenv's default of not overriding it.
+    return {**{name: value for name, value in values.items() if value is not None}, **os.environ}

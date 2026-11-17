@@ -4,34 +4,23 @@ import math
 import os
 import re
 import sys
-import csv
 import time
 import zipfile
 from collections import defaultdict
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import requests
 
 from garminconnect import Garmin, GarminConnectTooManyRequestsError
 
-from garmin_coach.paths import load_project_env, project_paths
-from garmin_coach.plan import PlanValidationError, TrainingPlan, no_active_plan, parse_training_plan
+from garmin_coach.activities import ACTIVITY_FIELDS, WEATHER_COORD_DECIMALS, ActivityStore
+from garmin_coach.athlete import load_athlete_config
+from garmin_coach.paths import project_paths
+from garmin_coach.plan import PlanValidationError, no_active_plan, parse_training_plan
 from garmin_coach.readiness import is_ready, readiness
-from garmin_workouts import load_manifest, managed_coverage_days
-
-# Load local variables without imposing machine-specific absolute paths.
-PATHS = load_project_env(project_paths())
-
-try:
-    import athlete_config as cfg
-except ModuleNotFoundError:
-    cfg = None
+from garmin_coach.manifest import load_manifest, managed_coverage_days
 
 # ─── CONFIG ───────────────────────────────────────────────
-GARMIN_EMAIL = os.getenv("GARMIN_EMAIL")
-GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD")
-
 # Start date for requesting history from Garmin
 HISTORY_START_DATE = "2024-01-01"
 # Days of overlap when fetching "only what's new" (time zones / late sync)
@@ -54,29 +43,6 @@ GARMIN_ACTIVITY_REQUEST_INTERVAL_SECONDS = 3.0
 # retrying instead of discarding the activity's data.
 GARMIN_RATE_LIMIT_RETRY_WAIT_SECONDS = 120
 GARMIN_RATE_LIMIT_MAX_RETRIES = 3
-
-CSV_PATH = str(PATHS.activities_csv)
-GARMIN_TOKEN_DIR = str(PATHS.token_dir)
-TRAINING_HISTORY_PATH = str(PATHS.training_history)
-LAPS_CSV_PATH = str(PATHS.laps_csv)
-
-# ─── Athlete config (athlete_config.py, local, gitignored) ──────────────
-GEAR_CHANGES_SECTION = getattr(cfg, "GEAR_CHANGES_SECTION", "")
-HR_ZONES = getattr(cfg, "HR_ZONES", [])
-EASY_ZONE_MAX = getattr(cfg, "EASY_ZONE_MAX", None)
-HARD_ZONE_MIN = getattr(cfg, "HARD_ZONE_MIN", None)
-GEAR_CHANGE_DATE = getattr(cfg, "GEAR_CHANGE_DATE", None)
-RACE_CALENDAR = getattr(cfg, "RACE_CALENDAR", [])
-LONG_RUN_KM = getattr(cfg, "LONG_RUN_KM", 0)
-QUALITY_LAP_PACE_THRESHOLD = getattr(cfg, "QUALITY_LAP_PACE_THRESHOLD", 0)
-MIN_QUALITY_LAP_KM = getattr(cfg, "MIN_QUALITY_LAP_KM", 0)
-QUALITY_KEYWORDS = getattr(cfg, "QUALITY_KEYWORDS", [])
-PERSONAL_RECORDS = getattr(cfg, "PERSONAL_RECORDS", [])
-WEATHER_LAT = getattr(cfg, "WEATHER_LAT", None)
-WEATHER_LON = getattr(cfg, "WEATHER_LON", None)
-WEATHER_TIMEZONE = getattr(cfg, "WEATHER_TIMEZONE", "auto") or "auto"
-ACTIVE_PLAN: TrainingPlan = no_active_plan()
-PLAN_ERROR: str | None = None
 # ──────────────────────────────────────────────────────────
 
 
@@ -164,9 +130,9 @@ def _is_quality(a, quality_keywords):
     return any(_title_has_keyword(title_lower, kw) for kw in quality_keywords)
 
 
-def _has_quality_lap(a, laps_by_id):
-    """True if any meaningful lap has pace ≤ QUALITY_LAP_PACE_THRESHOLD."""
-    if not MIN_QUALITY_LAP_KM or not QUALITY_LAP_PACE_THRESHOLD:
+def _has_quality_lap(a, laps_by_id, config):
+    """True if any meaningful lap has pace ≤ the configured quality-lap pace."""
+    if not config.min_quality_lap_km or not config.quality_lap_pace_threshold:
         return False
     aid = str(a.get("activity_id") or "").strip()
     if not aid or aid not in laps_by_id:
@@ -174,7 +140,7 @@ def _has_quality_lap(a, laps_by_id):
     for lap in laps_by_id[aid]:
         dist = float(lap.get("distance_km") or 0)
         pace = _pace_to_decimal(lap.get("avg_pace_min_km", ""))
-        if dist >= MIN_QUALITY_LAP_KM and pace is not None and pace <= QUALITY_LAP_PACE_THRESHOLD:
+        if dist >= config.min_quality_lap_km and pace is not None and pace <= config.quality_lap_pace_threshold:
             return True
     return False
 
@@ -213,7 +179,7 @@ def compute_race_countdown(race_calendar, today):
 BANDS = ("easy", "moderate", "hard")
 
 
-def band_boundaries():
+def band_boundaries(config):
     """Index cuts splitting the ordered HR_ZONES into easy, moderate, and hard.
 
     Zone systems differ: three physiological zones around LT1/LT2, Garmin's five,
@@ -222,23 +188,23 @@ def band_boundaries():
     three-zone one. EASY_ZONE_MAX and HARD_ZONE_MIN override that with 1-based
     zone numbers for any system where thirds are the wrong reading.
     """
-    count = len(HR_ZONES)
+    count = len(config.hr_zones)
     if count == 0:
         return 0, 0
     third = -(-count // 3)
     easy_end, hard_start = third, count - third
-    if EASY_ZONE_MAX:
-        easy_end = min(max(int(EASY_ZONE_MAX), 1), count)
-    if HARD_ZONE_MIN:
-        hard_start = min(max(int(HARD_ZONE_MIN) - 1, 0), count)
+    if config.easy_zone_max:
+        easy_end = config.easy_zone_max
+    if config.hard_zone_min:
+        hard_start = config.hard_zone_min - 1
     return easy_end, max(hard_start, easy_end)
 
 
-def describe_intensity_bands():
+def describe_intensity_bands(config):
     """Which configured zones fall in each band, for disclosure in the history."""
-    easy_end, hard_start = band_boundaries()
+    easy_end, hard_start = band_boundaries(config)
     grouped = {band: [] for band in BANDS}
-    for index, zone in enumerate(HR_ZONES):
+    for index, zone in enumerate(config.hr_zones):
         band = "easy" if index < easy_end else ("hard" if index >= hard_start else "moderate")
         grouped[band].append(zone[0])
     return " · ".join(
@@ -246,10 +212,10 @@ def describe_intensity_bands():
     )
 
 
-def _intensity_band(hr, bounds):
+def _intensity_band(hr, zones, bounds):
     """Map a heart rate to its band, or None when it falls outside every zone."""
     easy_end, hard_start = bounds
-    for index, zone in enumerate(HR_ZONES):
+    for index, zone in enumerate(zones):
         if zone[1] <= hr < zone[2]:
             if index < easy_end:
                 return "easy"
@@ -257,7 +223,7 @@ def _intensity_band(hr, bounds):
     return None
 
 
-def _lap_band_minutes(laps, bounds):
+def _lap_band_minutes(laps, zones, bounds):
     """Minutes per band from one activity's laps, or None when no lap is usable."""
     minutes = dict.fromkeys(BANDS, 0.0)
     usable = False
@@ -269,7 +235,7 @@ def _lap_band_minutes(laps, bounds):
             continue
         if hr is None or duration <= 0:
             continue
-        band = _intensity_band(hr, bounds)
+        band = _intensity_band(hr, zones, bounds)
         if band is None:
             continue
         minutes[band] += duration
@@ -277,7 +243,7 @@ def _lap_band_minutes(laps, bounds):
     return minutes if usable else None
 
 
-def compute_weekly_zone_pct(acts, laps_by_id=None, n_weeks=8):
+def compute_weekly_zone_pct(acts, config, laps_by_id=None, n_weeks=8):
     """Weekly intensity split, time-weighted and lap-level wherever laps exist.
 
     Classifying a whole activity by its average HR counts an interval session
@@ -285,15 +251,16 @@ def compute_weekly_zone_pct(acts, laps_by_id=None, n_weeks=8):
     and cooldown. Laps are used when present; an activity without them falls back
     to its average HR applied over its whole duration.
     """
-    bounds = band_boundaries()
+    zones = config.hr_zones
+    bounds = band_boundaries(config)
     weekly = defaultdict(lambda: {**dict.fromkeys(BANDS, 0.0), "km": 0.0, "lap_min": 0.0})
     for a in acts:
         aid = str(a.get("activity_id") or "").strip()
         laps = laps_by_id.get(aid) if laps_by_id and aid else None
-        minutes = _lap_band_minutes(laps, bounds) if laps else None
+        minutes = _lap_band_minutes(laps, zones, bounds) if laps else None
         from_laps = minutes is not None
         if minutes is None:
-            band = _intensity_band(a["avg_hr"], bounds) if a["avg_hr"] else None
+            band = _intensity_band(a["avg_hr"], zones, bounds) if a["avg_hr"] else None
             if band is None or a["duration_min"] <= 0:
                 continue
             minutes = dict.fromkeys(BANDS, 0.0)
@@ -338,12 +305,12 @@ def compute_acwr(acts, end_date):
     return seven / chronic, seven, chronic
 
 
-def compute_easy_hr_baseline(acts, quality_keywords):
-    if not GEAR_CHANGE_DATE:
+def compute_easy_hr_baseline(acts, quality_keywords, gear_change_date):
+    if not gear_change_date:
         return None, None
     easy = [a for a in acts if _is_easy(a, quality_keywords) and a["avg_hr"]]
-    pre = [a for a in easy if a["date"] < GEAR_CHANGE_DATE]
-    post = [a for a in easy if a["date"] >= GEAR_CHANGE_DATE]
+    pre = [a for a in easy if a["date"] < gear_change_date]
+    post = [a for a in easy if a["date"] >= gear_change_date]
 
     def stats(runs):
         if not runs:
@@ -361,7 +328,7 @@ def compute_easy_hr_baseline(acts, quality_keywords):
     return stats(pre), stats(post)
 
 
-def compute_pace_by_zone(acts):
+def compute_pace_by_zone(acts, zones):
     zone_paces = defaultdict(list)
     for a in acts:
         if not a["avg_hr"]:
@@ -369,12 +336,12 @@ def compute_pace_by_zone(acts):
         pace_dec = _pace_to_decimal(a["avg_pace"])
         if pace_dec is None:
             continue
-        for name, lo, hi in HR_ZONES:
+        for name, lo, hi in zones:
             if lo <= a["avg_hr"] < hi:
                 zone_paces[name].append(pace_dec)
                 break
     rows = []
-    for name, _, _ in HR_ZONES:
+    for name, _, _ in zones:
         paces = zone_paces[name]
         if not paces:
             rows.append((name, 0, "—", "—", "—"))
@@ -389,7 +356,7 @@ def compute_pace_by_zone(acts):
     return rows
 
 
-def identify_long_runs(acts, threshold_km=LONG_RUN_KM, n=10):
+def identify_long_runs(acts, threshold_km, n=10):
     if not threshold_km:
         return []
     lrs = [a for a in acts if a["distance_km"] >= threshold_km]
@@ -598,14 +565,8 @@ def compute_plan_compliance(acts, plan):
 
 # ─── WEATHER ─────────────────────────────────────────────────
 
-# Coordinates are rounded to this many decimals before grouping activities
-# into a weather-fetch location. 2 decimals (~1km) is already finer than the
-# archive API's native grid (~9-11km) — more precision wouldn't add signal,
-# it would just fragment nearby runs into separate API calls.
-WEATHER_COORD_DECIMALS = 2
 
-
-def fetch_weather_for_location(lat, lon, dates):
+def fetch_weather_for_location(lat, lon, dates, timezone="auto"):
     """Fetch daily temperature and humidity from Open-Meteo for a list of dates at one location.
     Returns dict {date_str: {"temp_c": float, "humidity_pct": int}}."""
     if lat is None or lon is None or not dates:
@@ -622,7 +583,7 @@ def fetch_weather_for_location(lat, lon, dates):
                 "start_date": start,
                 "end_date": end,
                 "daily": "temperature_2m_mean,relative_humidity_2m_mean",
-                "timezone": WEATHER_TIMEZONE,
+                "timezone": timezone,
             },
             timeout=15,
         )
@@ -642,49 +603,6 @@ def fetch_weather_for_location(lat, lon, dates):
     except Exception as e:
         print(f"Warning: weather fetch failed: {e}", flush=True)
         return {}
-
-
-# ─── AUTO-UPDATE ATHLETE PROFILE ─────────────────────────────
-
-def auto_update_athlete_profile(profile_path, vo2max, avg_4w_km):
-    """Update auto-generated sections in athlete-profile.md using HTML markers."""
-    if not profile_path or not os.path.exists(profile_path):
-        return
-    with open(profile_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    changed = False
-
-    # Update VO2max
-    if vo2max is not None:
-        pattern = r"(<!-- AUTO:VO2MAX -->).*?(<!-- /AUTO:VO2MAX -->)"
-        replacement = f"<!-- AUTO:VO2MAX -->{vo2max:.0f} ml/kg/min (Garmin)<!-- /AUTO:VO2MAX -->"
-        new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-        if new_content != content:
-            content = new_content
-            changed = True
-
-    # Update 4-week average
-    if avg_4w_km is not None:
-        pattern = r"(<!-- AUTO:4WAVG -->).*?(<!-- /AUTO:4WAVG -->)"
-        replacement = f"<!-- AUTO:4WAVG -->~{avg_4w_km:.0f} km/week<!-- /AUTO:4WAVG -->"
-        new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-        if new_content != content:
-            content = new_content
-            changed = True
-
-    # Shoe mileage — untracked (Strava API now requires a paid developer subscription)
-    pattern = r"(<!-- AUTO:SHOES -->).*?(<!-- /AUTO:SHOES -->)"
-    replacement = "<!-- AUTO:SHOES -->\n_Not tracked — Strava's API now requires a paid developer subscription._\n<!-- /AUTO:SHOES -->"
-    new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-    if new_content != content:
-        content = new_content
-        changed = True
-
-    if changed:
-        with open(profile_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        print("athlete-profile.md auto-updated (VO2max, avg km, shoes)", flush=True)
 
 
 def _lap_summary(activity_id, laps_by_id):
@@ -986,12 +904,15 @@ def fetch_garmin_race_predictions(client):
         return {}
 
 
-def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes=None):
-    """Regenerates training-history.md with fresh data from the CSV."""
+def render_training_history(rows, laps_rows, *, config, plan, now, laps_csv_path, race_predictions=None, shoes=None):
+    """Markdown for coaching/training-history.md, or None without activities.
+
+    Its section names are read by the coaching skills; tests/test_training_history.py
+    pins the ones they depend on.
+    """
     acts = _parse_activities(rows)
     if not acts:
-        print("No activities to generate training-history.md", flush=True)
-        return
+        return None
 
     total_runs = len(acts)
     date_min = min(a["date"] for a in acts)
@@ -1028,7 +949,7 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes
     weekly = defaultdict(lambda: {"total": 0.0, "easy": 0.0, "quality": 0.0})
     for a in acts:
         w_key = _week_start(a["date"])
-        is_qual = _is_quality(a, QUALITY_KEYWORDS) or _has_quality_lap(a, laps_by_id)
+        is_qual = _is_quality(a, config.quality_keywords) or _has_quality_lap(a, laps_by_id, config)
         weekly[w_key]["total"] += a["distance_km"]
         if is_qual:
             weekly[w_key]["quality"] += a["distance_km"]
@@ -1058,13 +979,13 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes
     zone_counts = defaultdict(int)
     hr_acts = [a for a in acts if a["avg_hr"]]
     for a in hr_acts:
-        for name, lo, hi in HR_ZONES:
+        for name, lo, hi in config.hr_zones:
             if lo <= a["avg_hr"] < hi:
                 zone_counts[name] += 1
                 break
 
     zone_rows = []
-    for name, lo, hi in HR_ZONES:
+    for name, lo, hi in config.hr_zones:
         count = zone_counts[name]
         pct = int(count / len(hr_acts) * 100) if hr_acts else 0
         hi_str = "+" if hi == 999 else str(hi)
@@ -1073,7 +994,7 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes
     # ── Notable quality sessions (keyword in title OR fast lap) ─
     quality_acts = [
         a for a in acts
-        if _is_quality(a, QUALITY_KEYWORDS) or _has_quality_lap(a, laps_by_id)
+        if _is_quality(a, config.quality_keywords) or _has_quality_lap(a, laps_by_id, config)
     ]
     quality_acts.sort(key=lambda x: x["date"], reverse=True)
     quality_rows = []
@@ -1087,10 +1008,10 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes
     show_self_eval = _section_has_data(acts, ["feeling", "perceived_effort"], threshold=0.05)
 
     # ── New metrics ─────────────────────────────────────────
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     # Race countdown
-    race_rows = compute_race_countdown(RACE_CALENDAR, today)
+    race_rows = compute_race_countdown(config.race_calendar, today)
     race_md = []
     for r in race_rows:
         race_md.append(
@@ -1111,8 +1032,8 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes
             )
 
     # Weekly zone %
-    wzp = compute_weekly_zone_pct(acts, laps_by_id, n_weeks=8)
-    band_description = describe_intensity_bands() or "_no zones configured_"
+    wzp = compute_weekly_zone_pct(acts, config, laps_by_id, n_weeks=8)
+    band_description = describe_intensity_bands(config) or "_no zones configured_"
     wzp_md = []
     for row in wzp:
         end = row["week_start"] + timedelta(days=6)
@@ -1155,9 +1076,9 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes
             f"(median {s['median_hr']}) · avg pace {pace}/km"
         )
 
-    if GEAR_CHANGE_DATE:
-        pre_stats, post_stats = compute_easy_hr_baseline(acts, QUALITY_KEYWORDS)
-        gear_baseline_section = f"""## Easy-Day HR Baseline (pre vs post gear change {GEAR_CHANGE_DATE.strftime('%Y-%m-%d')})
+    if config.gear_change_date:
+        pre_stats, post_stats = compute_easy_hr_baseline(acts, config.quality_keywords, config.gear_change_date)
+        gear_baseline_section = f"""## Easy-Day HR Baseline (pre vs post gear change {config.gear_change_date.strftime('%Y-%m-%d')})
 
 - **Before gear change**: {_fmt_stats(pre_stats)}
 - **After gear change**: {_fmt_stats(post_stats)}
@@ -1169,10 +1090,11 @@ def generate_training_history(rows, laps_rows=None, race_predictions=None, shoes
 _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
 
     # Recent long runs
-    lrs = identify_long_runs(acts, threshold_km=LONG_RUN_KM, n=10)
+    long_run_km = config.long_run_km
+    lrs = identify_long_runs(acts, threshold_km=long_run_km, n=10)
     long_run_heading = (
-        f"## Recent Long Runs (≥ {LONG_RUN_KM:.0f} km, last 10)"
-        if LONG_RUN_KM
+        f"## Recent Long Runs (≥ {long_run_km:.0f} km, last 10)"
+        if long_run_km
         else "## Recent Long Runs"
     )
     lr_md = []
@@ -1183,13 +1105,13 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
             f"| {a['avg_hr'] or '—'} |"
         )
     if not lr_md:
-        if LONG_RUN_KM:
-            lr_md.append(f"| _no runs ≥ {LONG_RUN_KM:.0f} km in record_ | | | | |")
+        if long_run_km:
+            lr_md.append(f"| _no runs ≥ {long_run_km:.0f} km in record_ | | | | |")
         else:
             lr_md.append("| _long-run threshold not configured_ | | | | |")
 
     # Recovery spacing
-    gaps = compute_recovery_spacing(acts, QUALITY_KEYWORDS, n=10)
+    gaps = compute_recovery_spacing(acts, config.quality_keywords, n=10)
     gap_md = []
     for prev, curr, days, flag in gaps:
         gap_md.append(
@@ -1201,7 +1123,7 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
         gap_md.append("| _not enough quality sessions yet_ | | |")
 
     # Pace by zone
-    pz = compute_pace_by_zone(acts)
+    pz = compute_pace_by_zone(acts, config.hr_zones)
     pz_md = []
     for name, count, avg_p, min_p, max_p in pz:
         pz_md.append(f"| {name} | {count} | {avg_p}/km | {min_p}/km | {max_p}/km |")
@@ -1253,7 +1175,7 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
         breakdown_section = "_No lap data yet — will populate after next sync._"
 
     # ── VDOT Predictions ─────────────────────────────────
-    vdot_data = compute_vdot_section(PERSONAL_RECORDS)
+    vdot_data = compute_vdot_section(config.personal_records)
     vdot_section_md = ""
     if vdot_data:
         vdot_val = vdot_data["vdot"]
@@ -1284,7 +1206,7 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
         )
 
     # ── Plan Compliance ──────────────────────────────────
-    compliance_weeks = compute_plan_compliance(acts, ACTIVE_PLAN)
+    compliance_weeks = compute_plan_compliance(acts, plan)
     compliance_md = ""
     if compliance_weeks:
         today_date = today.date()
@@ -1324,7 +1246,7 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
                     )
 
         compliance_md = (
-            f"## Plan Compliance ({len(ACTIVE_PLAN.sessions_by_week())}-week plan)\n\n"
+            f"## Plan Compliance ({len(plan.sessions_by_week())}-week plan)\n\n"
             f"### Weekly Summary\n\n"
             f"| Week | Sessions | Completion |\n"
             f"|------|----------|------------|\n"
@@ -1355,7 +1277,7 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
         )
 
     # ── Build markdown ──────────────────────────────────────
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now_str = now.strftime("%Y-%m-%d %H:%M")
     content = f"""\
 # Training History & Load Context
 
@@ -1519,32 +1441,22 @@ _No gear-change date configured, so no pre/post-gear HR comparison is shown._"""
 
 ---
 
-{GEAR_CHANGES_SECTION}
+{config.gear_changes_section}
 
 ---
 
 ## Full Activity Log ({total_runs} runs, most recent first)
 
-> Full per-lap splits are in `{LAPS_CSV_PATH}` — consult that file for detailed lap-by-lap analysis of any activity.
+> Full per-lap splits are in `{laps_csv_path}` — consult that file for detailed lap-by-lap analysis of any activity.
 
 | Date | Title | km | min | Pace | Avg HR | Max HR | Cad | Cal | VO2 | Feel | Eff | Temp | Hum | Laps |
 |------|-------|----|-----|------|--------|--------|-----|-----|-----|------|-----|------|-----|------|
 {chr(10).join(all_log_rows)}
 """
-
-    with open(TRAINING_HISTORY_PATH, "w", encoding="utf-8") as f:
-        f.write(content)
-    print(f"training-history.md updated ({total_runs} activities, through {date_max.date()})", flush=True)
-
-
-def ensure_sync_output_directories():
-    """Create the parent directories for both local sync CSVs."""
-    for csv_path in (CSV_PATH, LAPS_CSV_PATH):
-        Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
+    return content
 
 
 def main():
-    global ACTIVE_PLAN, PLAN_ERROR
     # Avoids a blank console (e.g. when opening the .py via Windows file association)
     if sys.stdout and hasattr(sys.stdout, "reconfigure"):
         try:
@@ -1553,53 +1465,50 @@ def main():
         except Exception:
             pass
 
-    requirements = readiness(PATHS)
+    paths = project_paths()
+    requirements = readiness(paths)
     if not is_ready(requirements, "sync"):
         print("Sync setup is incomplete. Run: python setup_status.py --json", flush=True)
         for item in requirements:
             if "sync" in item.required_for and item.state != "ready":
                 print(f"- {item.name}: {item.remediation}", flush=True)
         return 2
+    config = load_athlete_config(paths)
     try:
-        ACTIVE_PLAN = parse_training_plan(PATHS.training_plan)
+        plan = parse_training_plan(paths.training_plan)
     except PlanValidationError as exc:
-        PLAN_ERROR = str(exc)
-        ACTIVE_PLAN = no_active_plan()
-        print(f"Warning: plan compliance skipped: {PLAN_ERROR}", flush=True)
+        plan = no_active_plan()
+        print(f"Warning: plan compliance skipped: {exc}", flush=True)
 
     # Connect to Garmin
     print("Connecting to Garmin...", flush=True)
 
+    token_dir = str(paths.token_dir)
     try:
         # Try using saved tokens first
         client = Garmin()
-        client.login(tokenstore=GARMIN_TOKEN_DIR)
+        client.login(tokenstore=token_dir)
         print("Login with saved tokens succeeded", flush=True)
     except Exception as e:
         # An empty except used to hide 429s / broken tokens; the reason needs to be visible
         print(f"Could not use saved tokens: {e}", flush=True)
         print("Logging in with username and password...", flush=True)
-        client = Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
+        client = Garmin(paths.settings.get("GARMIN_EMAIL"), paths.settings.get("GARMIN_PASSWORD"))
         client.login()
         # Save tokens for next time
-        os.makedirs(GARMIN_TOKEN_DIR, exist_ok=True)
-        client.client.dump(GARMIN_TOKEN_DIR)
+        os.makedirs(token_dir, exist_ok=True)
+        client.client.dump(token_dir)
         print("Tokens saved for future runs", flush=True)
 
-    # Read dates already in the CSV to avoid duplicates
-    # On FULL_BACKFILL we rebuild from scratch so all rows get the latest fields (e.g. activity_id)
-    existing_dates = set()
-    existing_rows = []
-    if not FULL_BACKFILL and os.path.exists(CSV_PATH):
-        with open(CSV_PATH, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                existing_rows.append(row)
-                existing_dates.add(row["date"] + row["title"])  # date + title as unique key
+    store = ActivityStore(paths.activities_csv, paths.laps_csv)
+    if FULL_BACKFILL:
+        # Rebuild from scratch so all rows get the latest fields
+        store.rows = []
 
     # Date range: full history (empty CSV or FULL_BACKFILL) or just the new stretch
     end_date = datetime.today()
     history_start = datetime.strptime(HISTORY_START_DATE, "%Y-%m-%d")
+    max_d = store.latest_date()
 
     if FULL_BACKFILL:
         start_date = history_start
@@ -1607,16 +1516,13 @@ def main():
             f"Full backfill mode: from {start_date.date()} to {end_date.date()}...",
             flush=True,
         )
-    elif not existing_rows:
+    elif max_d is None:
         start_date = history_start
         print(
             f"Empty CSV: downloading full history from {start_date.date()}...",
             flush=True,
         )
     else:
-        max_d = max(
-            datetime.strptime(row["date"][:10], "%Y-%m-%d") for row in existing_rows
-        )
         start_date = max(
             history_start,
             max_d - timedelta(days=INCREMENTAL_OVERLAP_DAYS),
@@ -1633,56 +1539,12 @@ def main():
         "running",
     )
 
-    # Filter only the new ones
-    new_rows = []
-    for act in activities:
-        date = act.get("startTimeLocal", "")[:10]
-        title = act.get("activityName", "")
-        if date + title in existing_dates:
-            continue  # ya existe, saltar
-
-        distance_km = round((act.get("distance") or 0) / 1000, 2)
-        duration_min = round((act.get("duration") or 0) / 60, 2)
-        avg_pace = ""
-        if distance_km > 0 and duration_min > 0:
-            pace_decimal = duration_min / distance_km
-            mins = int(pace_decimal)
-            secs = int((pace_decimal - mins) * 60)
-            avg_pace = f"{mins}:{secs:02d}"
-
-        start_lat = act.get("startLatitude")
-        start_lon = act.get("startLongitude")
-
-        new_rows.append({
-            "activity_id": act.get("activityId", ""),
-            "date": date,
-            "title": title,
-            "distance_km": distance_km,
-            "duration_min": duration_min,
-            "avg_pace_min_km": avg_pace,
-            "avg_heart_rate": act.get("averageHR", ""),
-            "max_heart_rate": act.get("maxHR", ""),
-            "elevation_gain_m": act.get("elevationGain", ""),
-            "cadence": act.get("averageRunningCadenceInStepsPerMinute", ""),
-            "calories": act.get("calories", ""),
-            "stride_length_m": act.get("avgStrideLength", ""),
-            "vo2max": act.get("vO2MaxValue", ""),
-            "feeling": "",
-            "perceived_effort": "",
-            "weather_temp_c": "",
-            "weather_humidity_pct": "",
-            "weather_lat": round(start_lat, WEATHER_COORD_DECIMALS) if start_lat is not None else "",
-            "weather_lon": round(start_lon, WEATHER_COORD_DECIMALS) if start_lon is not None else "",
-        })
-
+    new_rows = store.merge(activities)
     if not new_rows:
         print("No new activities", flush=True)
     else:
         print(f"{len(new_rows)} new activities found", flush=True)
-
-    # Combine existing + new and sort by date
-    all_rows = existing_rows + new_rows
-    all_rows.sort(key=lambda x: x["date"])
+    all_rows = store.rows
 
     # ── Fetch FIT metrics (self-eval: feeling + perceived_effort) ───────
     if FETCH_SELF_EVAL:
@@ -1712,7 +1574,7 @@ def main():
             lat = _float_or_none(row.get("weather_lat", ""), ndigits=WEATHER_COORD_DECIMALS)
             lon = _float_or_none(row.get("weather_lon", ""), ndigits=WEATHER_COORD_DECIMALS)
             if lat is None or lon is None:
-                lat, lon = WEATHER_LAT, WEATHER_LON
+                lat, lon = config.weather_lat, config.weather_lon
             if lat is None or lon is None:
                 weather_without_coordinates.append(row)
                 continue
@@ -1733,59 +1595,41 @@ def main():
             )
             for (lat, lon), rows_at_location in location_groups.items():
                 dates_to_fetch = [r["date"][:10] for r in rows_at_location]
-                weather_data = fetch_weather_for_location(lat, lon, dates_to_fetch)
+                weather_data = fetch_weather_for_location(lat, lon, dates_to_fetch, config.weather_timezone)
                 for row in rows_at_location:
                     d = row["date"][:10]
                     if d in weather_data:
                         row["weather_temp_c"] = weather_data[d].get("temp_c", "")
                         row["weather_humidity_pct"] = weather_data[d].get("humidity_pct", "")
 
-    # Rewrite the full sorted CSV
-    fieldnames = [
-        "activity_id", "date", "title",
-        "distance_km", "duration_min", "avg_pace_min_km",
-        "avg_heart_rate", "max_heart_rate", "elevation_gain_m", "cadence", "calories",
-        "stride_length_m", "vo2max",
-        "feeling", "perceived_effort",
-        "weather_temp_c", "weather_humidity_pct", "weather_lat", "weather_lon",
-    ]
-
-    ensure_sync_output_directories()
-    with open(CSV_PATH, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(all_rows)
-
+    store.save()
     print(
-        f"CSV updated at {CSV_PATH} ({len(all_rows)} total activities)",
+        f"CSV updated at {paths.activities_csv} ({len(all_rows)} total activities)",
         flush=True,
     )
 
-    filled = sum(1 for row in all_rows for f in fieldnames if row.get(f, "") not in ("", None))
-    total_possible = len(all_rows) * len(fieldnames)
-    print(
-        f"Data: {filled:,} filled fields out of {total_possible:,} possible "
-        f"({filled / total_possible * 100:.1f}% coverage, {len(fieldnames)} fields x {len(all_rows)} activities)",
-        flush=True,
-    )
     n = len(all_rows)
-    for f in fieldnames:
-        count = sum(1 for row in all_rows if row.get(f, "") not in ("", None))
-        bar = "#" * (count * 20 // n) + "-" * (20 - count * 20 // n)
-        print(f"  {f:<35} {bar} {count:>3}/{n} ({count/n*100:>5.1f}%)", flush=True)
+    if n:
+        filled = sum(1 for row in all_rows for f in ACTIVITY_FIELDS if row.get(f, "") not in ("", None))
+        total_possible = n * len(ACTIVITY_FIELDS)
+        print(
+            f"Data: {filled:,} filled fields out of {total_possible:,} possible "
+            f"({filled / total_possible * 100:.1f}% coverage, {len(ACTIVITY_FIELDS)} fields x {n} activities)",
+            flush=True,
+        )
+        for f in ACTIVITY_FIELDS:
+            count = sum(1 for row in all_rows if row.get(f, "") not in ("", None))
+            bar = "#" * (count * 20 // n) + "-" * (20 - count * 20 // n)
+            print(f"  {f:<35} {bar} {count:>3}/{n} ({count/n*100:>5.1f}%)", flush=True)
 
     # ── Fetch lap data for new activities ─────────────────
-    laps_rows = []
-    if LAPS_CSV_PATH and os.path.exists(LAPS_CSV_PATH):
-        with open(LAPS_CSV_PATH, "r", encoding="utf-8") as f:
-            laps_rows = list(csv.DictReader(f))
-
-    if LAPS_CSV_PATH and os.path.exists(LAPS_CSV_PATH):
+    laps_rows = store.laps
+    if laps_rows and n:
         lap_ids_in_csv = set(r.get("activity_id", "") for r in laps_rows)
         acts_with_laps = sum(1 for r in all_rows if str(r.get("activity_id", "")) in lap_ids_in_csv)
         print(
-            f"Laps: {len(laps_rows):,} splits across {acts_with_laps}/{len(all_rows)} activities "
-            f"({acts_with_laps/len(all_rows)*100:.1f}% coverage)",
+            f"Laps: {len(laps_rows):,} splits across {acts_with_laps}/{n} activities "
+            f"({acts_with_laps/n*100:.1f}% coverage)",
             flush=True,
         )
 
@@ -1805,46 +1649,33 @@ def main():
                 if i < len(to_fetch) - 1:
                     time.sleep(GARMIN_ACTIVITY_REQUEST_INTERVAL_SECONDS)
             if new_lap_rows:
-                laps_rows = laps_rows + new_lap_rows
-                lap_fieldnames = ["activity_id", "lap_index", "distance_km",
-                                  "duration_min", "avg_pace_min_km",
-                                  "avg_hr", "max_hr", "calories"]
-                with open(LAPS_CSV_PATH, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=lap_fieldnames, extrasaction="ignore")
-                    writer.writeheader()
-                    writer.writerows(laps_rows)
-                print(f"{len(new_lap_rows)} lap records saved to {LAPS_CSV_PATH}", flush=True)
+                store.laps.extend(new_lap_rows)
+                store.save()
+                print(f"{len(new_lap_rows)} lap records saved to {paths.laps_csv}", flush=True)
 
     # ── Garmin race predictions ────────────────────────────
     race_predictions = fetch_garmin_race_predictions(client)
     shoes = fetch_garmin_shoe_mileage(client, all_rows)
 
     # Regenerate training-history.md with fresh data
-    generate_training_history(all_rows, laps_rows, race_predictions, shoes)
+    history = render_training_history(
+        all_rows, store.laps, config=config, plan=plan, now=datetime.now(),
+        laps_csv_path=paths.laps_csv, race_predictions=race_predictions, shoes=shoes,
+    )
+    if history is None:
+        print("No activities to generate training-history.md", flush=True)
+    else:
+        paths.training_history.parent.mkdir(parents=True, exist_ok=True)
+        paths.training_history.write_text(history, encoding="utf-8")
+        print(f"training-history.md updated ({n} activities, through {store.latest_date().date()})", flush=True)
 
-    if ACTIVE_PLAN.is_active:
+    if plan.is_active:
         try:
-            coverage = managed_coverage_days(load_manifest(PATHS.workout_manifest), datetime.today().date())
+            coverage = managed_coverage_days(load_manifest(paths.workout_manifest), datetime.today().date())
             if coverage < 14:
                 print(f"Managed Garmin workout coverage is {coverage} days. Ask whether to preview the next 14 days.", flush=True)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             print(f"Warning: workout coverage could not be checked: {exc}", flush=True)
-
-    # ── Auto-update athlete-profile.md ────────────────────
-    profile_path = str(Path(TRAINING_HISTORY_PATH).parent / "athlete-profile.md") if TRAINING_HISTORY_PATH else None
-    latest_vo2 = None
-    for row in reversed(all_rows):
-        if row.get("vo2max", "") not in ("", None):
-            latest_vo2 = float(row["vo2max"])
-            break
-    # Compute 4-week average
-    parsed_acts = _parse_activities(all_rows)
-    weekly_km = defaultdict(float)
-    for a in parsed_acts:
-        weekly_km[_week_start(a["date"])] += a["distance_km"]
-    last_4_weeks = sorted(weekly_km.keys())[-4:]
-    avg_4w_km = sum(weekly_km[w] for w in last_4_weeks) / len(last_4_weeks) if last_4_weeks else None
-    auto_update_athlete_profile(profile_path, latest_vo2, avg_4w_km)
 
     print("Done!", flush=True)
 

@@ -82,8 +82,14 @@ remain visible and versionable.
 - `garmin_coach.paths` resolves local workspace paths without machine-specific
   defaults, including an optional local `JOURNAL_PATH` such as an Obsidian
   folder.
+- `garmin_coach.athlete` loads `athlete_config.py` and names any setting the
+  sync cannot use.
 - `garmin_coach.readiness` powers `setup_status.py` and reports secret-free
-  named readiness requirements.
+  named readiness requirements, plus `ready_for` per purpose, workout coverage,
+  and the latest synced activity.
+- `garmin_coach.activities` keeps one row per Garmin activity, keyed by its
+  activity ID, and saves the CSVs without truncation risk.
+- `garmin_coach.manifest` records which Garmin workouts the workspace owns.
 - `garmin_coach.plan` validates the confirmed plan source:
   `coaching/training-plan.md` and its exactly-one JSON `plan-data` block.
 - `sync.py` keeps Garmin facts and generated history in local `data/` and
@@ -158,11 +164,10 @@ and Garmin workout definitions.
 During initial setup, record the athlete's goal, running availability,
 strength-day timing, and constraints in `coaching/athlete-profile.md`. These are
 inputs to coaching judgment, not a fixed weekly recipe. No plan is proposed
-without a stated goal — a dated race, a time target at a distance, or a general
-goal such as building aerobic base — because the goal is what makes a given
-quality session justifiable. The agent should state the main stressors, recovery
-spacing, planned volume, and intended intensity mix when it proposes or changes
-a plan.
+without a stated goal, because the goal is what makes a given quality session
+justifiable; `skills/running-plan-design/SKILL.md` defines the goal types. The
+agent should state the main stressors, recovery spacing, planned volume, and
+intended intensity mix when it proposes or changes a plan.
 
 The athlete's own history sets the level of a proposal: planned weekly volume,
 longest run, and quality frequency are compared against the recent medians in
@@ -170,21 +175,15 @@ longest run, and quality frequency are compared against the recent medians in
 progression. That comparison replaces any template keyed to the number of
 running days per week.
 
-Aim for roughly 80% of planned running time at low aerobic intensity, counting
-warm-ups, cooldowns, and recovery running. Compute it from the `plan-data` steps
-rather than by labelling whole sessions: a set of intervals wrapped in a warm-up
-and cooldown is mostly easy running. Treat the 80% as a block-level guardrail
-that individual weeks may deviate from with a stated reason, then contrast it
-with the synced Weekly Intensity Split and its `From laps` coverage rather than
-assuming planned pace equals actual physiological intensity.
+Intensity is counted by time, step by step: roughly 80% of running time at low
+aerobic intensity across a block, with warm-ups, cooldowns, and recoveries
+counted as the easy running they are. `skills/running-intensity/SKILL.md` holds
+the complete rules for planned and observed intensity.
 
-State how the low-aerobic band maps to the athlete's zones; the 80/20
-literature's threshold-based zones are not automatically Garmin's five.
 `HR_ZONES` may hold any number of zones — three physiological ones around
 LT1/LT2, Garmin's five, or the athlete's own — split into easy, moderate, and
 hard bands by thirds of the list unless `EASY_ZONE_MAX` and `HARD_ZONE_MIN` say
-otherwise. The generated history names the resulting bands, so read them there
-instead of inferring a band from a zone's number or name.
+otherwise. The generated history names the resulting bands.
 
 ```plan-data
 {
@@ -223,14 +222,18 @@ python garmin_workouts.py --days 14 --apply <preview-id>
 
 The preview contains only `create`, `update`, `reschedule`, `unchanged`, and
 `unschedule` actions. `--apply` requires the exact saved preview ID and checks
-manifest ownership plus remote name/state immediately before a write. Manually
+manifest ownership plus remote name/state immediately before a write. The
+manifest is saved after every remote write, so an interrupted apply leaves no
+unowned workout and the next preview resumes where it stopped. Manually
 managed Garmin workouts remain outside the system.
 
-## 6. Install coaching skills
+## 6. Coaching skills
 
-Install the folders under `skills/` with your agent's normal skill mechanism;
-preserve each folder and its `SKILL.md`. Start with `running-coach`, which
-checks readiness and routes to specialised skills. The public package has no
+The workspace's `AGENTS.md`, imported by `CLAUDE.md`, points any agent opened
+in it at `skills/running-coach`, which checks readiness and routes to the
+specialised skills; nothing needs installing. To use the skills outside the
+workspace, install the folders under `skills/` with your agent's normal skill
+mechanism, preserving each folder and its `SKILL.md`. The public package has no
 monolithic coaching skill.
 
 The fictional files under `examples/coaching/` show the full handoff from
